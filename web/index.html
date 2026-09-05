@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MakerWorld Analytics</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="vendor/chart.umd.min.js"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span class="logo">MW</span><div><b>ANALYTICS</b><small id="handle">@you</small></div></div>
+    <div class="searchbox"><input id="globalSearch" placeholder="🔍 Suche (Modelle, Kunden, Projekte)" autocomplete="off"><div id="searchResults" class="search-results" hidden></div></div>
+    <nav>
+      <a data-route="heute" class="active">🏠 Heute</a>
+      <div class="nav-sep">Analyse</div>
+      <a data-route="overview">Übersicht</a>
+      <a data-route="momentum">Momentum</a>
+      <a data-route="compare">Vergleich</a>
+      <a data-route="groups">Kategorien</a>
+      <a data-route="points">Punkte</a>
+      <a data-route="report">Bericht</a>
+      <div class="nav-sep">CRM</div>
+      <a data-route="contacts">Kunden</a>
+      <a data-route="leads">Leads</a>
+      <a data-route="projekte">Projekte</a>
+      <a data-route="revenue">Finanzen</a>
+      <a data-route="teile">Teile &amp; Kalkulation</a>
+      <div class="nav-sep">Produktion</div>
+      <a data-route="pipeline">Produkte</a>
+      <a data-route="todos">Todos<span class="cnt" id="todoCnt">0</span></a>
+      <div class="nav-sep">System</div>
+      <a data-route="data">Daten &amp; Pull</a>
+    </nav>
+    <div class="pull-box">
+      <button id="pullBtn" class="btn primary">Live-Pull starten</button>
+      <div id="pullStatus" class="pull-status"></div>
+    </div>
+    <div class="sidefoot" id="lastPull"></div>
+  </aside>
+
+  <main id="view"><div class="loading">lädt …</div></main>
+
+  <!-- Modell-Detail Overlay -->
+  <div id="drawer" class="drawer hidden"><div class="drawer-inner"></div></div>
+</body>
+<script src="app.js"></script>
+</html>

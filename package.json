@@ -1,0 +1,22 @@
+{
+  "name": "makerworld-analytics-app",
+  "version": "1.0.0",
+  "description": "Self-hosted analytics dashboard and lightweight CRM for your own MakerWorld 3D models",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "seed:demo": "node server/seed-demo.js",
+    "import": "node server/importer.js",
+    "login": "node server/scraper.js --login",
+    "pull": "node server/scraper.js --pull"
+  },
+  "license": "MIT",
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "express": "^4.21.2",
+    "node-cron": "^3.0.3",
+    "playwright": "^1.50.1"
+  }
+}

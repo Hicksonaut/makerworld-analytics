@@ -1,0 +1,19 @@
+[Unit]
+Description=MakerWorld Analytics (Dashboard + taeglicher Pull)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=youruser
+WorkingDirectory=/home/youruser/makerworld-analytics-app
+Environment=PORT=4000
+Environment=NODE_ENV=production
+# xvfb-run stellt ein virtuelles Display bereit, damit der Pull ein sichtbares
+# (headful) Chromium starten kann - headless wird von Cloudflare geblockt.
+ExecStart=/usr/bin/xvfb-run -a --server-args="-screen 0 1400x1000x24" /usr/bin/node server/index.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,13 @@
+# dependencies
+node_modules/
+
+# local data — never commit your own account data
+data/
+*.db
+*.db-wal
+*.db-shm
+session.json
+
+# logs / os
+*.log
+.DS_Store
