@@ -1,5 +1,22 @@
 // MakerWorld Analytics — Frontend (helles, eckiges CRM). Vanilla JS + Chart.js
 const $ = (s, r = document) => r.querySelector(s);
+// ---- Sprache / i18n -------------------------------------------------------
+// Quelle der Wahrheit im Code ist Deutsch; t() übersetzt zur Laufzeit ins
+// Englische (Wörterbuch TR am Dateiende). Alle Texte laufen über el() -> t().
+const LANG = { cur: (() => { try { return localStorage.getItem('lang') || 'de'; } catch { return 'de'; } })() };
+const LOC = () => LANG.cur === 'en' ? 'en-US' : 'de-DE';
+function t(s) {
+  if (s == null || LANG.cur === 'de') return s;
+  s = String(s); if (TR[s] != null) return TR[s];
+  // Muster "Label (Zusatz)" -> Präfix (und ggf. Zähl-Wort im Zusatz) übersetzen.
+  const m = s.match(/^(.+?) \((.*)\)$/);
+  if (m && TR[m[1]] != null) {
+    let inner = m[2]; const w = inner.match(/^([\d.,]+) (.+)$/);
+    if (w && TR[w[2]] != null) inner = w[1] + ' ' + TR[w[2]];
+    return TR[m[1]] + ' (' + inner + ')';
+  }
+  return s;
+}
 const el = (tag, attrs = {}, ...kids) => {
   const n = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -8,16 +25,16 @@ const el = (tag, attrs = {}, ...kids) => {
     else if (k.startsWith('on')) n.addEventListener(k.slice(2), v);
     else if (v != null && v !== false) n.setAttribute(k, v === true ? '' : v);
   }
-  for (const c of kids.flat()) if (c != null && c !== false) n.append(c.nodeType ? c : document.createTextNode(c));
+  for (const c of kids.flat()) if (c != null && c !== false) n.append(c.nodeType ? c : document.createTextNode(t(String(c))));
   return n;
 };
 const api = (p, opt) => fetch('/api' + p, opt).then(r => r.json());
 const jpost = (p, body, m = 'POST') => api(p, { method: m, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-const fmt = n => n == null ? '–' : Number(n).toLocaleString('de-DE');
-const fmt1 = n => n == null ? '–' : Number(n).toLocaleString('de-DE', { maximumFractionDigits: 1 });
-const eur = n => n == null ? '–' : Number(n).toLocaleString('de-DE', { style: 'currency', currency: 'EUR' });
+const fmt = n => n == null ? '–' : Number(n).toLocaleString(LOC());
+const fmt1 = n => n == null ? '–' : Number(n).toLocaleString(LOC(), { maximumFractionDigits: 1 });
+const eur = n => n == null ? '–' : Number(n).toLocaleString(LOC(), { style: 'currency', currency: 'EUR' });
 const rate = () => STATE.overview?.settings?.eur_per_point || (40 / 524);
-const nice = iso => iso ? new Date(iso).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' }) : '–';
+const nice = iso => iso ? new Date(iso).toLocaleString(LOC(), { dateStyle: 'short', timeStyle: 'short' }) : '–';
 const today = () => new Date().toISOString().slice(0, 10);
 const COLORS = ['#1f5c8f','#1a7f37','#b4620a','#c1332d','#6b4fa1','#0e7490','#a3357a','#4b5563','#2563eb','#059669','#d97706','#7c3aed'];
 
@@ -39,7 +56,7 @@ function exportTableCsv(filename, sel = '#view table') {
   const blob = new Blob(['﻿' + rows.join('\r\n')], { type: 'text/csv;charset=utf-8' });
   const a = el('a', { href: URL.createObjectURL(blob), download: filename }); document.body.append(a); a.click(); a.remove();
 }
-const csvBtn = (name) => el('button', { class: 'btn sm', onclick: () => exportTableCsv(name) }, '⭳ CSV');
+const csvBtn = (name) => el('button', { class: 'btn sm', onclick: () => exportTableCsv(name) }, 'CSV');
 
 let STATE = { overview: null };
 
@@ -86,13 +103,37 @@ function deltaCell(v, dec = 0) {
 const routes = { heute: renderHeute, overview: renderOverview, momentum: renderMomentum, compare: renderCompare,
   groups: renderGroups, points: renderPoints, report: renderReport,
   contacts: renderContacts, leads: renderLeads, projekte: renderProjekte, revenue: renderRevenue, teile: renderParts,
-  pipeline: renderPipeline, todos: renderTodos, events: renderEvents, data: renderData };
+  pipeline: renderPipeline, selbst: renderSelfProjects, druckplan: renderDruckplan, material: renderMaterial,
+  todos: renderTodos, events: renderEvents, data: renderData };
 function go(route) {
   document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.route === route));
   location.hash = route;
   (routes[route] || renderOverview)();
 }
 document.querySelectorAll('nav a').forEach(a => a.addEventListener('click', () => go(a.dataset.route)));
+
+// Navigations-Beschriftungen je Sprache (Zähler-Badge bleibt erhalten).
+const NAVLABELS = {
+  heute: ['Heute', 'Today'], overview: ['Übersicht', 'Overview'], momentum: ['Momentum', 'Momentum'],
+  compare: ['Vergleich', 'Comparison'], groups: ['Kategorien', 'Categories'], points: ['Punkte', 'Points'],
+  report: ['Bericht', 'Report'], contacts: ['Kunden', 'Customers'], leads: ['Leads', 'Leads'],
+  projekte: ['Projekte', 'Projects'], revenue: ['Finanzen', 'Finance'], teile: ['Teile & Kalkulation', 'Parts & Costing'],
+  pipeline: ['Produkte', 'Products'], selbst: ['Eigenprojekte', 'Own Projects'], druckplan: ['Druckplan', 'Print Queue'], material: ['Filament-Lager', 'Filament Stock'],
+  todos: ['Aufgaben', 'Tasks'], data: ['Daten & Pull', 'Data & Sync']
+};
+function applyNavLang() {
+  const i = LANG.cur === 'en' ? 1 : 0;
+  document.querySelectorAll('nav a').forEach(a => { const lbl = NAVLABELS[a.dataset.route]; if (!lbl) return;
+    const cnt = a.querySelector('.cnt'); a.textContent = lbl[i]; if (cnt) a.append(cnt); });
+  document.querySelectorAll('.nav-sep').forEach(d => { d.dataset.de = d.dataset.de || d.textContent; d.textContent = t(d.dataset.de); });
+  const gs = $('#globalSearch'); if (gs) { gs.dataset.de = gs.dataset.de || gs.placeholder; gs.placeholder = t(gs.dataset.de); }
+  const pb = $('#pullBtn'); if (pb && !/(läuft|running)/i.test(pb.textContent)) pb.textContent = t('Live-Pull starten');
+  document.querySelectorAll('#langSw a').forEach(a => a.classList.toggle('on', a.dataset.lang === LANG.cur));
+  document.documentElement.lang = LANG.cur;
+}
+document.querySelectorAll('#langSw a').forEach(a => a.addEventListener('click', () => setLang(a.dataset.lang)));
+function setLang(l) { if (l === LANG.cur) return; LANG.cur = l; try { localStorage.setItem('lang', l); } catch {}
+  applyNavLang(); const r = location.hash.slice(1) || 'heute'; (routes[r] || renderOverview)(); }
 
 async function loadOverview() {
   STATE.overview = await api('/overview');
@@ -162,7 +203,7 @@ async function renderOverview() {
   segSel.onchange = () => { const s = segments.find(x => x.id == segSel.value); if (s) applySegment(s.config); };
   const toolbar = el('div', { class: 'toolbar' }, search, el('label', {}, 'Status'), stFilter, segSel,
     el('button', { class: 'btn sm', onclick: saveSegment }, '＋ Segment'),
-    el('button', { class: 'btn sm ghost', onclick: delSegment, title: 'gewähltes Segment löschen' }, '🗑'),
+    el('button', { class: 'btn sm ghost', onclick: delSegment, title: 'gewähltes Segment löschen' }, ''),
     csvBtn('uebersicht.csv'), el('span', { class: 'muted', style: 'margin-left:auto' }, 'Klick = Details'));
   w.append(toolbar);
   const wrap = el('div', { class: 'tablewrap' }); w.append(wrap);
@@ -427,6 +468,40 @@ async function renderPoints() {
     el('thead', {}, el('tr', {}, el('th', {}, 'Modell'), el('th', { class: 'n' }, 'Punkte'), el('th', { class: 'n' }, 'Verdient'), el('th', { class: 'n' }, 'Punkte·30T'), el('th', { class: 'n' }, '€·30T'), el('th', { class: 'n' }, 'Boost'))),
     el('tbody', {}, d.perModel.map(m => el('tr', { onclick: () => openModel(m.design_id) },
       el('td', { class: 'title' }, m.title), el('td', { class: 'n' }, fmt(m.point)), el('td', { class: 'n pos' }, eur(m.earned)), el('td', { class: 'n' }, fmt(m.pts30)), el('td', { class: 'n' }, eur(m.earned30)), el('td', { class: 'n' }, fmt(m.boost)))))));
+
+  // ===== Punkte-Matrix (Reverse Engineering) =====
+  const pm = await api('/analytics/points-matrix').catch(() => null);
+  if (pm && pm.shares && pm.shares.total > 0) {
+    const sh = pm.shares; const pctOf = v => sh.total ? Math.round((v / sh.total) * 100) : 0;
+    const stat = (v, l, cls, dd) => el('div', { class: 'stat' }, el('div', { class: 'v ' + (cls || '') }, v), el('div', { class: 'l' }, l), dd ? el('div', { class: 'd muted' }, dd) : null);
+    w.append(el('div', { class: 'pagehead', style: 'padding:12px 0;border:0;margin-top:10px' }, el('h1', { style: 'font-size:15px' }, 'Punkte-Matrix (Reverse Engineering)')));
+    w.append(el('div', { class: 'stats' },
+      stat(fmt1(pm.perDownload), 'Punkte / Download', 'pos', pm.fit.downloadCorr != null ? 'Korrelation ' + pm.fit.downloadCorr : 'zu wenig Daten'),
+      stat(fmt1(pm.perPrint), 'Punkte / Druck', 'pos', pm.fit.printCorr != null ? 'Korrelation ' + pm.fit.printCorr : 'zu wenig Daten'),
+      stat(fmt(pm.predTotal), 'Prognose Punkte · 30 T', '', eur(pm.predTotalEur) + ' bei gleicher Aktivität'),
+      stat(fmt(pm.fit.samples), 'Datenpunkte (Tage)', 'muted', 'wird mit jedem Pull genauer')));
+    // Herkunft der Punkte (MakerWorlds eigene Kategorisierung = Basis der "Matrix")
+    const bar = (label, val) => el('div', { class: 'checkline' }, el('span', { style: 'flex:1' }, label),
+      el('div', { class: 'goalbar', style: 'width:160px' }, el('i', { style: `width:${pctOf(val)}%` }), el('span', {}, pctOf(val) + '%')),
+      el('span', { class: 'num muted', style: 'font-size:11px' }, fmt(val) + ' P'));
+    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Herkunft der Punkte (Lifetime)'),
+      el('div', { class: 'bd muted', style: 'padding-bottom:0' }, 'MakerWorlds eigene Aufteilung — daraus + der Rate je Download/Druck lässt sich das Punktesystem annähern. Die Rate wird mit jedem täglichen Pull genauer (aktuell ' + fmt(pm.fit.samples) + ' Tagesdatenpunkte).'),
+      el('div', { class: 'bd' }, bar('Modell (Downloads)', sh.model), bar('Druckprofil (Drucke)', sh.inst), bar('Bewertungen', sh.ratings), bar('Sonstige', sh.others))));
+    if (pm.byModel && pm.byModel.length) {
+      const wrap2 = el('div', { class: 'tablewrap' });
+      wrap2.append(el('table', {}, el('thead', {}, el('tr', {},
+        el('th', {}, 'Modell'), el('th', { class: 'n' }, 'Punkte-Tage'), el('th', { class: 'n' }, 'Ø Abstand'),
+        el('th', { class: 'n' }, 'letzter'), el('th', { class: 'n' }, 'Tage her'), el('th', { class: 'n' }, 'Prognose 30 T'))),
+        el('tbody', {}, pm.byModel.map(m => el('tr', { onclick: () => openModel(m.design_id) },
+          el('td', { class: 'title' }, m.title),
+          el('td', { class: 'n' }, fmt(m.events)),
+          el('td', { class: 'n' }, m.avgGap != null ? fmt1(m.avgGap) + ' T' : '–'),
+          el('td', { class: 'n muted' }, m.lastDate || '–'),
+          el('td', { class: 'n ' + ((m.daysSince ?? 0) > (m.avgGap ?? 1e9) ? 'neg' : 'muted') }, m.daysSince != null ? m.daysSince : '–'),
+          el('td', { class: 'n pos' }, '+' + fmt(m.pred30)))))));
+      w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Punkte-Timing & Prognose je Modell', el('span', { class: 'muted', style: 'font-weight:400;text-transform:none' }, '„Tage her" rot = überfällig ggü. Ø-Abstand')), wrap2));
+    }
+  }
 }
 
 // ============ BERICHT (Wochenrückblick) ============
@@ -434,7 +509,7 @@ async function renderReport() {
   if (!STATE.overview) await loadOverview();
   const o = STATE.overview, models = o.models, t = o.totals;
   const w = pagehead('Bericht', 'Wochenrückblick — Bewegung der letzten 7 Tage, Prognose und offene Punkte.');
-  w.append(el('div', { class: 'toolbar' }, el('button', { class: 'btn sm', onclick: () => window.print() }, '🖨 Drucken / PDF')));
+  w.append(el('div', { class: 'toolbar' }, el('button', { class: 'btn sm', onclick: () => window.print() }, 'Drucken / PDF')));
 
   const dl7 = models.reduce((s, m) => s + (m.dl7 || 0), 0);
   const v7 = models.reduce((s, m) => s + (m.v7 || 0), 0);
@@ -461,6 +536,23 @@ async function renderReport() {
     miniTable('Heißeste Aufsteiger (Views-Trend)', risers, m => '+' + m.v_trend + '%', 'pos'),
     miniTable('Prognose Downloads · nächste 30 T', [...models].sort((a, b) => (b.proj_dl30 || 0) - (a.proj_dl30 || 0)).slice(0, 5), m => '+' + fmt(m.proj_dl30))));
 
+  // Änderungswirkung aggregiert: was bringen Titelbild-/Titel-/Tag-/Beschreibung-Änderungen im Schnitt?
+  const ci = await api('/analytics/change-impact').catch(() => ({ rows: [] }));
+  if (ci.rows && ci.rows.length) {
+    const wrap = el('div', { class: 'tablewrap' });
+    wrap.append(el('table', {}, el('thead', {}, el('tr', {},
+      el('th', {}, 'Änderungstyp'), el('th', { class: 'n' }, 'Anzahl'), el('th', { class: 'n' }, 'Ø CTR-Δ'),
+      el('th', { class: 'n' }, 'Trefferquote'), el('th', { class: 'n' }, 'Downloads v→n'))),
+      el('tbody', {}, ci.rows.map(r => el('tr', {},
+        el('td', { class: 'title' }, r.label),
+        el('td', { class: 'n' }, fmt(r.count)),
+        r.avgCtrDelta == null ? el('td', { class: 'n muted' }, '–') : el('td', { class: 'n ' + (r.avgCtrDelta > 0 ? 'pos' : r.avgCtrDelta < 0 ? 'neg' : '') }, (r.avgCtrDelta > 0 ? '+' : '') + fmt1(r.avgCtrDelta) + '%'),
+        el('td', { class: 'n ' + (r.winRate >= 50 ? 'pos' : r.winRate != null ? 'neg' : 'muted') }, r.winRate != null ? r.winRate + '%' : '–'),
+        el('td', { class: 'n muted' }, r.dlChangePct != null ? (r.dlChangePct > 0 ? '+' : '') + r.dlChangePct + '%' : '–'))))));
+    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Wirkung von Änderungen (aggregiert, ±' + ci.win + ' Tage)', el('span', { class: 'muted', style: 'font-weight:400;text-transform:none' }, ci.measured + ' von ' + ci.totalEvents + ' auswertbar')),
+      el('div', { class: 'bd muted', style: 'padding-bottom:0' }, 'Über alle Modelle: durchschnittliche CTR-Veränderung vor/nach einer Änderung + Anteil der Änderungen, die die CTR verbessert haben („Trefferquote"). Zeigt, welcher Hebel wirklich zieht.'), wrap));
+  }
+
   // Alerts + letzte Änderungen
   if (o.alerts && o.alerts.length) {
     const al = el('div', { class: 'alerts' });
@@ -482,7 +574,7 @@ async function renderReport() {
 let todoFilter = '0';
 async function renderTodos() {
   if (!STATE.overview) await loadOverview();
-  const w = pagehead('Todos', 'Aufgaben pro Modell und global — hier alle an einem Ort.');
+  const w = pagehead('Aufgaben', 'Aufgaben je Modell und global — zentral gebündelt.');
   const models = STATE.overview.models;
   const titleI = el('input', { placeholder: 'Neue Aufgabe …', style: 'flex:1;min-width:200px' });
   const modelSel = el('select', {}, el('option', { value: '' }, '— global —'), models.map(m => el('option', { value: m.design_id }, m.title || m.design_id)));
@@ -511,7 +603,7 @@ function todoRow(t, after) {
   const cb = el('input', { type: 'checkbox' }); cb.checked = !!t.done;
   cb.onchange = async () => { await jpost('/todos/' + t.id, { done: cb.checked }, 'PUT'); await loadOverview(); after && after(); };
   const overdue = t.due_date && !t.done && t.due_date < today();
-  const link = t.contact_name ? el('span', { class: 'pill', onclick: () => openContact(t.contact_id) }, '👤 ' + t.contact_name + (t.project_title ? ' · ' + t.project_title : ''))
+  const link = t.contact_name ? el('span', { class: 'pill', onclick: () => openContact(t.contact_id) }, '' + t.contact_name + (t.project_title ? ' · ' + t.project_title : ''))
     : t.model_title ? el('span', { class: 'pill', onclick: () => openModel(t.design_id) }, t.model_title)
     : el('span', { class: 'pill' }, 'global');
   return el('li', { class: 'todo' + (t.done ? ' done' : '') },
@@ -519,6 +611,35 @@ function todoRow(t, after) {
     el('span', { class: 't' }, t.title), link,
     t.due_date ? el('span', { class: 'due' + (overdue ? ' over' : '') }, t.due_date) : null,
     el('button', { class: 'btn sm ghost', onclick: async () => { await api('/todos/' + t.id, { method: 'DELETE' }); await loadOverview(); after && after(); } }, '✕'));
+}
+
+// ---- Drag & Drop für Kanban-Boards (Alternative zum Dropdown) ------------
+let _drag = null;
+function dndCard(card, id, allow) {   // allow = erlaubte Zielspalten (sonst alle)
+  card.setAttribute('draggable', 'true');
+  card.addEventListener('dragstart', e => { _drag = { id, allow }; e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', String(id)); } catch {} setTimeout(() => card.classList.add('dragging'), 0); });
+  card.addEventListener('dragend', () => { card.classList.remove('dragging');
+    document.querySelectorAll('.col.dragover').forEach(c => c.classList.remove('dragover')); _drag = null; });
+}
+function dndColumn(col, stage, onDrop) {
+  const ok = () => _drag && (!_drag.allow || _drag.allow.includes(stage));
+  col.addEventListener('dragover', e => { if (!ok()) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; col.classList.add('dragover'); });
+  col.addEventListener('dragleave', e => { if (!col.contains(e.relatedTarget)) col.classList.remove('dragover'); });
+  col.addEventListener('drop', async e => { e.preventDefault(); col.classList.remove('dragover');
+    const d = _drag; _drag = null; if (!d || (d.allow && !d.allow.includes(stage))) return; await onDrop(d.id, stage); });
+}
+
+// Stufen-Pfad (Chevron-Leiste à la Salesforce Path). stages=[[key,label]], onSelect(key).
+function stagePath(stages, curKey, onSelect) {
+  const order = stages.map(s => s[0]); const ci = order.indexOf(curKey);
+  const bar = el('div', { class: 'pathbar' });
+  stages.forEach(([v, l], i) => {
+    const state = i < ci ? 'done' : i === ci ? 'cur' : 'todo';
+    bar.append(el('div', { class: 'pathseg ' + state, title: l, onclick: () => onSelect(v) },
+      i < ci ? el('span', { class: 'pmark' }, '✓') : null, el('span', {}, l)));
+  });
+  return bar;
 }
 
 // ============ PIPELINE (Kanban) ============
@@ -533,10 +654,11 @@ async function renderPipeline() {
   STATUSES.forEach(([sv, sl]) => {
     const members = all.filter(m => stOf(m) === sv).sort((a, b) => (b.download || 0) - (a.download || 0));
     const col = el('div', { class: 'col' }, el('div', { class: 'colhd', style: `border-top:3px solid ${STATUS_COLOR[sv]}` }, sl, el('span', { class: 'cnt' }, members.length)));
+    dndColumn(col, sv, async (id, stage) => { const mm = all.find(x => x.design_id === id); if (mm) mm.status = stage;
+      await jpost('/model/' + id + '/status', { status: stage }, 'PUT'); renderPipeline(); });
     members.forEach(m => {
       const planned = !!m.planned;
-      const opts = planned ? STATUSES.filter(([v]) => ['idee','arbeit'].includes(v)) : STATUSES;
-      const sel = el('select', { class: 'sm', onclick: e => e.stopPropagation() }, opts.map(([v, l]) => el('option', { value: v }, l)));
+      const sel = el('select', { class: 'sm', onclick: e => e.stopPropagation() }, STATUSES.map(([v, l]) => el('option', { value: v }, l)));
       sel.value = sv;
       sel.onchange = async e => { e.stopPropagation(); m.status = sel.value; await jpost('/model/' + m.design_id + '/status', { status: sel.value }, 'PUT'); renderPipeline(); };
       const card = el('div', { class: 'kcard', onclick: () => planned ? openPlanned(m.design_id) : openModel(m.design_id) },
@@ -544,6 +666,7 @@ async function renderPipeline() {
         planned ? el('div', { class: 'muted', style: 'font-size:11px' }, m.group_label ? 'Kategorie: ' + m.group_label : 'zum Planen anklicken')
           : el('div', { class: 'muted num', style: 'font-size:11px' }, `${fmt(m.download)} DL · ${fmt(m.view)} V · ${eur(m.earned)}`),
         sel);
+      dndCard(card, m.design_id);   // alle Stufen erlaubt (auch geplante -> Live)
       col.append(card);
     });
     if (!members.length) col.append(el('div', { class: 'muted', style: 'padding:8px' }, '—'));
@@ -614,7 +737,7 @@ async function openPlanned(id) {
     el('div', { class: 'bd' }, el('div', { class: 'row' }, tIn, tPrio, tDue, el('button', { class: 'btn primary sm', onclick: addTodo }, '+')), tl)));
 
   body.append(el('div', { class: 'card' }, el('div', { class: 'bd' },
-    el('button', { class: 'btn ghost sm', onclick: async () => { if (!confirm('Geplantes Produkt löschen?')) return; await api('/products/' + id, { method: 'DELETE' }); closeDrawer(); await loadOverview(); renderPipeline(); } }, '🗑 Geplantes Produkt löschen'))));
+    el('button', { class: 'btn ghost sm', onclick: async () => { if (!confirm('Geplantes Produkt löschen?')) return; await api('/products/' + id, { method: 'DELETE' }); closeDrawer(); await loadOverview(); renderPipeline(); } }, 'Geplantes Produkt löschen'))));
 }
 
 // ============ ÄNDERUNGEN ============
@@ -892,7 +1015,7 @@ function renderEventEditor(design_id, events) {
 // ============ HEUTE (Aktions-Dashboard) ============
 async function renderHeute() {
   const d = await api('/today');
-  const w = pagehead('Heute', 'Was ansteht — offene Zahlungen, Aufgaben, Alerts und Änderungen.');
+  const w = pagehead('Heute', 'Tagesübersicht: offene Zahlungen, fällige Aufgaben, Hinweise und Änderungen.');
   const tile = (v, l, cls) => el('div', { class: 'stat' }, el('div', { class: 'v ' + (cls || '') }, fmt(v)), el('div', { class: 'l' }, l));
   w.append(el('div', { class: 'stats' },
     tile(d.counts.payments, 'offene Zahlungen', d.counts.payments ? 'neg' : ''),
@@ -900,29 +1023,44 @@ async function renderHeute() {
     tile(d.counts.todos, 'offene Aufgaben'),
     tile(d.counts.alerts, 'Alerts')));
 
+  // Insights + Meilensteine (best effort — blockieren die Seite nicht)
+  const [ins, ms] = await Promise.all([api('/insights').catch(() => ({ insights: [] })), api('/milestones').catch(() => [])]);
+  if (ins.insights && ins.insights.length) {
+    const bd = el('div', { class: 'bd' });
+    ins.insights.forEach(i => bd.append(el('div', { class: 'checkline', style: i.design_id ? 'cursor:pointer' : '', onclick: () => i.design_id && openModel(i.design_id) },
+      el('span', { style: 'flex:1' }, el('b', {}, i.title), el('span', { class: 'muted' }, ' — ' + i.text)))));
+    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Insights', el('a', { onclick: () => go('report'), style: 'font-weight:400;text-transform:none;font-size:11px' }, 'Bericht →')), bd));
+  }
+  if (Array.isArray(ms) && ms.length) {
+    const bd = el('div', { class: 'bd' });
+    ms.slice(0, 6).forEach(m => bd.append(el('div', { class: 'checkline', style: m.design_id ? 'cursor:pointer' : '', onclick: () => m.design_id && openModel(m.design_id) },
+      el('span', { class: 'muted' }, '•'), el('span', { style: 'flex:1' }, m.title), el('span', { class: 'muted num', style: 'font-size:11px' }, m.date))));
+    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Meilensteine'), bd));
+  }
+
   if (d.openPayments.length) {
     const bd = el('div', { class: 'bd' });
     d.openPayments.forEach(p => bd.append(el('div', { class: 'checkline', style: 'cursor:pointer', onclick: () => openProject(p.id) },
       el('span', { class: 'tag', style: 'background:var(--neg)' }, 'offen'),
       el('span', { style: 'flex:1' }, el('b', {}, p.contact_name), el('span', { class: 'muted' }, ' · ' + p.title)),
       el('span', { class: 'num' }, p.price ? eur(p.price) : '—'))));
-    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, '💶 Offene Zahlungen'), bd));
+    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Offene Zahlungen'), bd));
   }
   const openT = el('ul', { class: 'todolist' });
   const drawT = () => { openT.innerHTML = ''; if (!d.dueTodos.length) openT.append(el('li', { class: 'muted' }, 'Keine offenen Aufgaben.'));
     d.dueTodos.forEach(t => openT.append(todoRow(t, renderHeute))); };
   drawT();
-  w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, '✅ Aufgaben'), el('div', { class: 'bd' }, openT)));
+  w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Aufgaben'), el('div', { class: 'bd' }, openT)));
 
   if (d.alerts.length) { const al = el('div', { class: 'alerts' });
     d.alerts.forEach(a => al.append(el('div', { class: 'alert', onclick: () => a.design_id && openModel(a.design_id) },
       el('span', { class: 'tag ' + a.type }, a.type), el('b', {}, a.title || 'Global'), el('span', { class: 'muted' }, '— ' + a.text))));
-    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, `📊 Alerts (${d.alerts.length})`), al)); }
+    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, `Alerts (${d.alerts.length})`), al)); }
   if (d.recentChanges.length) { const list = el('ul', { class: 'timeline' });
     d.recentChanges.forEach(c => list.append(el('li', {}, el('span', { class: 'date' }, c.date), el('span', { class: 'pill' }, c.type),
       el('div', { style: 'flex:1' }, el('b', {}, c.model_title || ''), c.note ? el('div', { class: 'muted' }, c.note) : null),
       c.design_id ? el('a', { onclick: () => openModel(c.design_id) }, 'öffnen') : null)));
-    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, '🔄 Änderungen (letzte 3 Tage)'), el('div', { class: 'bd' }, list))); }
+    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Änderungen (letzte 3 Tage)'), el('div', { class: 'bd' }, list))); }
 }
 
 // ---- Globale Suche ----
@@ -935,8 +1073,8 @@ function setupSearch() {
       const grp = (title, items, fn) => { if (!items.length) return; box.append(el('div', { class: 'grp' }, title)); items.forEach(it => box.append(fn(it))); };
       const close = () => { box.hidden = true; inp.value = ''; };
       grp('Modelle', r.models, m => el('a', { onclick: () => { close(); openModel(m.design_id); } }, m.title || m.design_id));
-      grp('Kunden', r.contacts, c => el('a', { onclick: () => { close(); openContact(c.id); } }, '👤 ' + c.name));
-      grp('Projekte', r.projects, p => el('a', { onclick: () => { close(); openProject(p.id); } }, '🗂 ' + p.title + ' · ' + p.contact_name));
+      grp('Kunden', r.contacts, c => el('a', { onclick: () => { close(); openContact(c.id); } }, '' + c.name));
+      grp('Projekte', r.projects, p => el('a', { onclick: () => { close(); openProject(p.id); } }, '' + p.title + ' · ' + p.contact_name));
       if (!r.models.length && !r.contacts.length && !r.projects.length) box.append(el('div', { class: 'grp' }, 'nichts gefunden'));
       box.hidden = false;
     }, 250); });
@@ -969,7 +1107,7 @@ async function openInvoice(pid) {
   .bar .pri{background:#1f5c8f;color:#fff;border-color:#1f5c8f;font-weight:600}
   @media print{body{margin:0;padding:0}.bar{display:none}}</style></head><body>
   <div class=bar><b>Rechnung ${num}</b><span class=muted style="flex:1">→ „Als PDF speichern" und dann selbst per WhatsApp / Mail / AirDrop verschicken.</span>
-    <button class=pri onclick="window.print()">🖨 Als PDF speichern</button><button onclick="window.close()">Schließen</button></div>
+    <button class=pri onclick="window.print()">Als PDF speichern</button><button onclick="window.close()">Schließen</button></div>
   <div class=row><div><h1>${esc(seller.name)}</h1><div class=muted>${esc(seller.address || '')}<br>${esc(seller.email || '')} ${esc(seller.phone || '')}</div></div>
   <div style="text-align:right"><b>Rechnung</b><br>Nr. ${num}<br>${dt}</div></div>
   <div style="margin-top:24px"><div class=muted>Rechnung an</div><b>${esc(custName)}</b><br>${esc(c.email || '')}</div>
@@ -992,6 +1130,22 @@ const OSTATUS_COLOR = { angefragt: '#6b7280', bestaetigt: '#1f5c8f', produktion:
 const PROJECT_STATUS = [['offen','Offen'],['in_arbeit','In Arbeit'],['fertig','Fertig'],['abgebrochen','Abgebrochen']];
 const PROJECT_STAGES = [['anfrage','Anfrage'],['modellierung','Modellieren'],['druck','Drucken'],['fertig','Fertig'],['abgebrochen','Abgebrochen']];
 const PSTAGE_COLOR = { anfrage: '#6b7280', modellierung: '#9a6a00', druck: '#1f5c8f', fertig: '#1a7f37', abgebrochen: '#c1332d' };
+// Eigenprojekte (kein Kunde): eigener Produktions-Workflow bis zur Veröffentlichung.
+const SELF_STAGES = [['idee','Idee'],['modellierung','Modellieren'],['druck','Drucken'],['fotos','Fotos'],['eintrag','MW-Eintrag'],['publish','Veröffentlicht'],['abgebrochen','Abgebrochen']];
+const SSTAGE_COLOR = { idee: '#6b7280', modellierung: '#9a6a00', druck: '#1f5c8f', fotos: '#0e7490', eintrag: '#7c3aed', publish: '#1a7f37', abgebrochen: '#c1332d' };
+// Prioritäten (alle Projekte) — zum Strukturieren, was wann verfolgt wird.
+const PRIORITIES = [['3','Dringend'],['2','Hoch'],['1','Normal'],['0','Niedrig']];
+const PRIO_COLOR = { 3: '#c1332d', 2: '#b4620a', 1: '#6b7280', 0: '#9aa0a6' };
+const prioLabel = v => (PRIORITIES.find(x => +x[0] === +v) || ['1', 'Normal'])[1];
+// Stufen je Projekt-Typ (self / kind); ohne "abgebrochen" für Board/Path.
+const stagesOf = p => p.self ? SELF_STAGES : (p.kind === 'modell' ? PROJECT_STAGES.filter(s => s[0] !== 'druck') : PROJECT_STAGES);
+const stageColorOf = p => p.self ? SSTAGE_COLOR : PSTAGE_COLOR;
+// Deadline-Badge (überfällig rot, bald orange).
+function deadlineBadge(due) { if (!due) return null;
+  const days = Math.ceil((Date.parse(due) - Date.now()) / 86400000);
+  const cls = days < 0 ? 'neg' : days <= 3 ? 'warn' : 'muted';
+  return el('span', { class: 'ddl ' + cls, title: 'Deadline ' + due }, days < 0 ? 'überfällig ' + (-days) + ' T' : days === 0 ? 'heute' : 'in ' + days + ' T'); }
+function prioBadge(v) { if (v == null) return null; return el('span', { class: 'prio-badge', style: `background:${PRIO_COLOR[v] || '#6b7280'}` }, prioLabel(v)); }
 const PART_CATEGORIES = [['magnet','Magnet'],['schraube','Schraube'],['metall','Metallteil'],['elektronik','Elektronik'],['sonstiges','Sonstiges']];
 const labelOf = (arr, v) => (arr.find(x => x[0] === v) || [v, v])[1];
 const mkSelect = (opts, val, cls) => { const s = el('select', cls ? { class: cls } : {}, opts.map(([v, l]) => el('option', { value: v }, l))); s.value = val; return s; };
@@ -1003,7 +1157,7 @@ async function newContact() { const name = prompt('Name des Kunden/Leads:'); if 
 // ---- Kundenliste ----
 async function renderContacts() {
   if (!STATE.overview) await loadOverview();
-  const w = pagehead('Kunden', 'Kontakte, Projekte und Bestellungen — dein CRM.');
+  const w = pagehead('Kunden', 'Kontakte, Projekte und Aufträge im CRM.');
   const list = await api('/contacts');
   w.append(el('div', { class: 'toolbar' }, el('button', { class: 'btn primary sm', onclick: newContact }, '＋ Kunde'), csvBtn('kunden.csv'),
     el('span', { class: 'muted' }, `${list.length} Kontakte · Klick = Details`)));
@@ -1060,7 +1214,7 @@ async function openContact(id) {
       row('Handle', 'mw_handle'), row('E-Mail', 'email'), row('Telefon', 'phone'),
       el('div', { class: 'row' }, el('label', { style: 'min-width:70px' }, 'Tags'), f.tags),
       notesTa, el('div', { class: 'row' }, el('button', { class: 'btn sm', onclick: saveC }, 'Speichern'),
-        el('button', { class: 'btn sm ghost', onclick: async () => { if (!confirm('Kunde inkl. Projekte & Bestellungen löschen?')) return; await api('/contacts/' + id, { method: 'DELETE' }); closeDrawer(); renderContacts(); } }, '🗑 Kunde löschen')))));
+        el('button', { class: 'btn sm ghost', onclick: async () => { if (!confirm('Kunde inkl. Projekte & Bestellungen löschen?')) return; await api('/contacts/' + id, { method: 'DELETE' }); closeDrawer(); renderContacts(); } }, 'Kunde löschen')))));
 
   const reload = async () => { const nd = await api('/contact/' + id); drawProjects(nd.projects); drawTodos(nd.todos || []); };
 
@@ -1076,17 +1230,18 @@ async function openContact(id) {
         el('button', { class: 'btn sm ghost', onclick: async e => { e.stopPropagation(); if (!confirm('Projekt löschen?')) return; await api('/projects/' + p.id, { method: 'DELETE' }); reload(); } }, '✕'))); }); };
   drawProjects(d.projects);
   const pTitle = el('input', { placeholder: 'Neues Projekt …', style: 'flex:1' }); const pModel = modelSelect();
-  const addP = async () => { if (!pTitle.value.trim()) return; const np = await jpost('/projects', { contact_id: id, title: pTitle.value.trim(), design_id: pModel.value || null }); pTitle.value = ''; openProject(np.id); };
+  const pKind = mkSelect([['modell_print', 'Modell + Druck'], ['modell', 'nur Modellarbeit']], 'modell_print');
+  const addP = async () => { if (!pTitle.value.trim()) return; const np = await jpost('/projects', { contact_id: id, title: pTitle.value.trim(), design_id: pModel.value || null, kind: pKind.value }); pTitle.value = ''; openProject(np.id); };
   pTitle.addEventListener('keydown', e => { if (e.key === 'Enter') addP(); });
   body.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Projekte', el('span', { class: 'muted', style: 'font-weight:400;text-transform:none' }, 'Klick = Kalkulation')),
-    el('div', { class: 'bd' }, pl, el('div', { class: 'row', style: 'margin-top:8px' }, pTitle, pModel, el('button', { class: 'btn primary sm', onclick: addP }, '+ Projekt')))));
+    el('div', { class: 'bd' }, pl, el('div', { class: 'row', style: 'margin-top:8px' }, pTitle, pModel, pKind, el('button', { class: 'btn primary sm', onclick: addP }, '+ Projekt')))));
 
   // Follow-up-Aufgaben (Todos) für diesen Kunden
   const tl = el('ul', { class: 'todolist' });
   const drawTodos = ts => { tl.innerHTML = ''; if (!ts.length) tl.append(el('li', { class: 'muted' }, 'Keine Aufgaben.'));
     ts.forEach(t => tl.append(todoRow(t, reload))); };
   drawTodos(d.todos || []);
-  const tIn = el('input', { placeholder: 'z.B. zurückrufen, liefern …', style: 'flex:1' });
+  const tIn = el('input', { placeholder: 'z.B. Rückruf, Lieferung …', style: 'flex:1' });
   const tPrio = el('select', {}, [['1','normal'],['2','hoch'],['0','niedrig']].map(([v, l]) => el('option', { value: v }, l)));
   const tDue = el('input', { type: 'date' });
   const addT = async () => { if (!tIn.value.trim()) return; await jpost('/todos', { contact_id: id, title: tIn.value.trim(), priority: +tPrio.value, due_date: tDue.value || null }); tIn.value = ''; tDue.value = ''; reload(); await loadOverview(); };
@@ -1104,12 +1259,15 @@ async function renderLeads() {
   CONTACT_STAGES.forEach(([sv, sl]) => {
     const members = list.filter(c => (c.stage || 'neu') === sv);
     const col = el('div', { class: 'col' }, el('div', { class: 'colhd', style: `border-top:3px solid ${STAGE_COLOR[sv]}` }, sl, el('span', { class: 'cnt' }, members.length)));
+    dndColumn(col, sv, async (id, stage) => { await jpost('/contacts/' + id, { stage }, 'PUT'); renderLeads(); });
     members.forEach(c => {
       const sel = mkSelect(CONTACT_STAGES, sv, 'sm'); sel.onclick = e => e.stopPropagation();
       sel.onchange = async e => { e.stopPropagation(); await jpost('/contacts/' + c.id, { stage: sel.value }, 'PUT'); renderLeads(); };
-      col.append(el('div', { class: 'kcard', onclick: () => openContact(c.id) },
+      const card = el('div', { class: 'kcard', onclick: () => openContact(c.id) },
         el('div', { class: 'kt' }, c.name),
-        el('div', { class: 'muted', style: 'font-size:11px' }, `${labelOf(SOURCES, c.source)} · ${c.order_count} Best. · ${eur(c.order_total)}`), sel));
+        el('div', { class: 'muted', style: 'font-size:11px' }, `${labelOf(SOURCES, c.source)} · ${c.order_count} Best. · ${eur(c.order_total)}`), sel);
+      dndCard(card, c.id);
+      col.append(card);
     });
     if (!members.length) col.append(el('div', { class: 'muted', style: 'padding:8px' }, '—'));
     board.append(col);
@@ -1162,7 +1320,7 @@ async function renderRevenue() {
         el('td', { class: 'n pos' }, eur(r.mwEarned)),
         el('td', { class: 'n ' + (r.net >= 0 ? 'pos' : 'neg') }, eur(r.net)))))));
     w.append(el('div', { class: 'card' },
-      el('div', { class: 'hd' }, 'Projekte → MakerWorld-Ertrag', el('span', { class: 'muted', style: 'font-weight:400;text-transform:none' }, 'Summe ' + eur(d.projectModelsTotal))),
+      el('div', { class: 'hd' }, 'Projekte → MakerWorld-Ertrag', el('span', { class: 'muted', style: 'font-weight:400;text-transform:none' }, t('Summe') + ' ' + eur(d.projectModelsTotal))),
       el('div', { class: 'bd muted', style: 'padding-bottom:0' }, 'Privat entstandene Projekte, deren hochgeladenes Modell danach über Downloads/Punkte Geld einbringt. „netto" = MakerWorld-Ertrag − Materialeinsatz des Projekts.'), wrap));
   }
   if (d.monthly && d.monthly.length) {
@@ -1247,9 +1405,10 @@ function calcClient(p, parts, s, items = []) {
   const tier = (s.tiers || []).find(t => t.name === p.margin_tier);
   const margin = tier ? tier.margin : ((s.tiers && s.tiers[0]?.margin) ?? 0.6);
   const roundUp = (x, st) => st > 0 ? Math.ceil(x / st) * st : x;
-  const suggestion = free ? 0 : roundUp(cost * (1 + margin), s.round_to);
+  const exclusiveFee = p.no_upload ? (+p.no_upload_fee || 0) : 0;
+  const suggestion = (free ? 0 : roundUp(cost * (1 + margin), s.round_to)) + exclusiveFee;
   const price = (p.price != null && p.price !== '') ? +p.price : suggestion;
-  return { filament, partsSum, energy, material, labor, cost, margin, free, suggestion, price, profit: price - cost, contribution: price - material, loss: price <= 0 ? -material : 0, filamentG, printH, hasItems };
+  return { filament, partsSum, energy, material, labor, cost, margin, free, suggestion, price, profit: price - cost, contribution: price - material, loss: price <= 0 ? -material : 0, filamentG, printH, hasItems, exclusiveFee };
 }
 async function openProject(id) {
   const s = await api('/crm/settings');
@@ -1266,7 +1425,9 @@ async function openProject(id) {
   const persist = () => { clearTimeout(saveT); saveT = setTimeout(async () => {
     await jpost('/projects/' + id, { title: p.title, stage: p.stage, design_id: p.design_id, filament_g: +p.filament_g || null,
       print_hours: +p.print_hours || null, labor_hours: +p.labor_hours || null, margin_tier: p.margin_tier,
-      price: (p.price === '' || p.price == null) ? null : +p.price, paid: p.paid ? 1 : 0, qty: +p.qty || 1 }, 'PUT');
+      price: (p.price === '' || p.price == null) ? null : +p.price, paid: p.paid ? 1 : 0, qty: +p.qty || 1,
+      kind: p.kind || 'modell_print', no_upload: p.no_upload ? 1 : 0, no_upload_fee: +p.no_upload_fee || 0,
+      close_date: p.close_date || null, due_date: p.due_date || null, priority: p.priority ?? 1 }, 'PUT');
     await loadOverview();
   }, 500); };
 
@@ -1276,27 +1437,72 @@ async function openProject(id) {
     const mwE = p.mw?.earned || 0;
     const total = +((c.price - c.material) + mwE).toFixed(2);
     const tile = (v, l, cls, d) => el('div', { class: 'stat' }, el('div', { class: 'v ' + (cls || '') }, v), el('div', { class: 'l' }, l), d ? el('div', { class: 'd muted' }, d) : null);
-    res.append(
+    if (p.self) {   // Eigenprojekt: eigene Kosten + MakerWorld-Ertrag, kein Kundenpreis
+      const selfBal = +(mwE - c.cost).toFixed(2);
+      res.append(
+        tile(eur(c.material), 'Material (Sach)'),
+        tile(eur(c.cost), 'Selbstkosten', '', 'inkl. Arbeitszeit'),
+        tile(eur(mwE), 'MakerWorld-Ertrag', mwE > 0 ? 'pos' : 'muted', p.mw ? `${fmt(p.mw.download)} DL · ${fmt(p.mw.point)} P` : (p.design_id ? '' : 'noch nicht veröffentlicht')),
+        tile(eur(selfBal), 'Bilanz', selfBal >= 0 ? 'pos' : 'neg', 'MakerWorld − Selbstkosten'));
+      return;
+    }
+    const modelOnly = p.kind === 'modell';
+    const tiles = [
       tile(eur(c.material), 'Material (Sach)'),
       c.free ? tile(eur(c.loss), 'Verlust', 'neg') : tile(eur(c.price), 'Preis', 'pos'),
-      tile(eur(c.profit), 'Gewinn direkt', c.profit >= 0 ? 'pos' : 'neg'),
+      tile(eur(c.profit), 'Gewinn direkt', c.profit >= 0 ? 'pos' : 'neg')];
+    if (!modelOnly || p.design_id) tiles.push(
       tile(eur(mwE), 'MakerWorld-Ertrag', mwE > 0 ? 'pos' : 'muted', p.mw ? `${fmt(p.mw.download)} DL · ${fmt(p.mw.point)} P` : 'kein Modell verknüpft'),
-      tile(eur(total), 'Gesamtbilanz', total >= 0 ? 'pos' : 'neg', 'direkt + MakerWorld'),
-      tile(c.free ? '–' : eur(c.suggestion), 'Preisvorschlag'));
+      tile(eur(total), 'Gesamtbilanz', total >= 0 ? 'pos' : 'neg', 'direkt + MakerWorld'));
+    tiles.push(tile(c.free ? '–' : eur(c.suggestion), 'Preisvorschlag'));
+    res.append(...tiles);
     priceHint.textContent = c.free ? 'kostenlos' : (p.price == null || p.price === '' ? 'leer = Vorschlag ' + eur(c.suggestion) : '');
   };
 
-  const stageSel = mkSelect(PROJECT_STAGES, p.stage);
-  stageSel.onchange = () => { p.stage = stageSel.value; persist(); };
+  const stageSel = mkSelect(stagesOf(p), p.stage);
+  stageSel.onchange = () => setStage(stageSel.value);
+  // Art des Projekts (nur Kundenprojekte): Modell + Druck oder nur Modellarbeit.
+  const kindSel = mkSelect([['modell_print', 'Modell + Druck'], ['modell', 'nur Modellarbeit']], p.kind || 'modell_print');
+  const rebuildStages = () => { stageSel.innerHTML = '';
+    stagesOf(p).forEach(([v, l]) => stageSel.append(el('option', { value: v }, l)));
+    if (![...stageSel.options].some(o => o.value === p.stage)) p.stage = stagesOf(p)[0][0];
+    stageSel.value = p.stage; };
+  kindSel.onchange = () => { p.kind = kindSel.value; rebuildStages(); applyKind(); persist(); drawRes(); drawPath(); };
+  // Stufen-Pfad (Path) — Chevrons + "Stufe abschließen" (Abbrechen bleibt im Dropdown)
+  const pathWrap = el('div', { style: 'flex:1;min-width:220px' });
+  const markBtn = el('button', { class: 'btn primary sm' }, 'Stufe abschließen');
+  const closeDateI = el('input', { type: 'date', value: p.close_date || '' });
+  closeDateI.onchange = () => { p.close_date = closeDateI.value || null; persist(); };
+  const pathStages = () => stagesOf(p).filter(sd => sd[0] !== 'abgebrochen');
+  const lastStage = () => pathStages().slice(-1)[0][0];   // 'fertig' bzw. 'publish' (Eigenprojekt)
+  const setStage = (v) => { p.stage = v; stageSel.value = v; applyKind(); persist(); drawPath();
+    if (v === lastStage() && !p.close_date) { p.close_date = today(); closeDateI.value = p.close_date; } };
+  function drawPath() { const st = pathStages(); pathWrap.innerHTML = ''; pathWrap.append(stagePath(st, p.stage, setStage));
+    const done = p.stage === lastStage(); markBtn.disabled = done; markBtn.textContent = done ? 'Abgeschlossen' : 'Stufe abschließen'; }
+  markBtn.onclick = () => { const order = pathStages().map(s => s[0]); const i = order.indexOf(p.stage); if (i > -1 && i < order.length - 1) setStage(order[i + 1]); };
+  // Priorität + Deadline (alle Projekte) — zum Strukturieren, was wann drankommt.
+  const prioSel = mkSelect(PRIORITIES, String(p.priority ?? 1));
+  prioSel.onchange = () => { p.priority = +prioSel.value; persist(); };
+  const dueI = el('input', { type: 'date', value: p.due_date || '' });
+  dueI.onchange = () => { p.due_date = dueI.value || null; persist(); };
   const titleI = el('input', { value: p.title || '', style: 'font-size:14px;font-weight:600;flex:1;min-width:200px' });
   titleI.oninput = () => { p.title = titleI.value; persist(); };
   inner.append(el('div', { class: 'dh' },
     el('div', { style: 'flex:1' }, el('div', { class: 'row', style: 'margin:0 0 4px' }, titleI),
-      el('div', { class: 'muted' }, (p.contact_name || '') + (p.model_title ? ' · Modell: ' + p.model_title : ''))),
+      el('div', { class: 'muted' }, (p.self ? 'Eigenprojekt' : (p.contact_name || '')) + (p.model_title ? ' · Modell: ' + p.model_title : ''))),
     el('div', { class: 'row', style: 'margin:0;align-items:center' }, el('label', {}, 'Phase'), stageSel),
     el('span', { class: 'close', onclick: closeDrawer }, '✕')));
   const body = el('div', { class: 'dbody' }); inner.append(body);
   body.append(res);
+
+  // Stufen-Pfad (Path) + Priorität/Deadline/Abschlussdatum
+  body.append(el('div', { class: 'card' }, el('div', { class: 'bd' },
+    el('div', { class: 'row', style: 'align-items:center;gap:12px;flex-wrap:wrap' }, pathWrap, markBtn),
+    el('div', { class: 'row', style: 'margin-top:6px;flex-wrap:wrap' },
+      el('label', { style: 'min-width:96px' }, 'Priorität'), prioSel,
+      el('label', { style: 'margin-left:12px' }, 'Deadline'), dueI,
+      el('label', { style: 'margin-left:12px' }, 'Abschluss'), closeDateI))));
+  drawPath();
 
   // Eingaben
   const num = (key, label, ph, w) => { const i = el('input', { type: 'number', step: '0.01', value: p[key] ?? '', placeholder: ph, style: `width:${w || 90}px` });
@@ -1308,7 +1514,7 @@ async function openProject(id) {
   priceI.oninput = () => { p.price = priceI.value; drawRes(); persist(); };
   const refreshMw = async () => { if (!p.design_id) { p.mw = null; drawRes(); return; }
     try { const md = await api('/model/' + p.design_id); const sn = md.snaps?.[md.snaps.length - 1] || {}; p.mw = { earned: md.model.earned ?? 0, point: sn.point ?? 0, download: sn.download ?? 0, view: sn.view ?? 0 }; } catch { p.mw = null; } drawRes(); };
-  const modelSel = modelSelect(p.design_id); modelSel.onchange = () => { p.design_id = modelSel.value || null; persist(); refreshMw(); };
+  const modelSel = modelSelect(p.design_id); modelSel.onchange = () => { p.design_id = modelSel.value || null; applyKind(); persist(); refreshMw(); };
   const fillFromModel = el('button', { class: 'btn sm ghost', title: 'Filament & Druckzeit aus dem Standard-Druckprofil (× Stückzahl)', onclick: async () => {
     if (!p.design_id) return toast('Erst ein Modell wählen.');
     const md = await api('/model/' + p.design_id);
@@ -1328,25 +1534,51 @@ async function openProject(id) {
   const paidCb = el('input', { type: 'checkbox' }); paidCb.checked = !!p.paid;
   paidCb.onchange = () => { p.paid = paidCb.checked; persist(); loadOverview(); };
   // Modell-Vorschlag / Veröffentlichen
-  const modelRow = el('div', { class: 'row' }, el('label', { style: 'min-width:96px' }, 'Modell'), modelSel, fillFromModel);
+  const modelLabel = el('label', { style: 'min-width:96px' }, 'Modell');
+  const modelRow = el('div', { class: 'row' }, modelLabel, modelSel, fillFromModel);
   const suggestBtn = el('button', { class: 'btn sm ghost', onclick: async () => {
     const sug = await api('/crm/model-suggestions?q=' + encodeURIComponent(p.title || ''));
     if (!sug.length) return toast('Kein passendes Modell gefunden.');
     const box = el('div', { class: 'row', style: 'margin-top:4px' }, el('span', { class: 'muted' }, 'Vorschlag:'),
-      ...sug.map(m => el('button', { class: 'btn sm', onclick: () => { p.design_id = m.design_id; modelSel.value = m.design_id; persist(); refreshMw(); box.remove(); toast('verknüpft: ' + m.title); } }, (m.title || '').slice(0, 28))));
+      ...sug.map(m => el('button', { class: 'btn sm', onclick: () => { p.design_id = m.design_id; modelSel.value = m.design_id; applyKind(); persist(); refreshMw(); box.remove(); toast('verknüpft: ' + m.title); } }, (m.title || '').slice(0, 28))));
     modelRow.after(box);
-  } }, '🔎 Vorschlag');
+  } }, 'Vorschlag');
   const pubBtn = el('button', { class: 'btn sm', onclick: async () => {
     const r = await jpost('/crm/projects/' + id + '/publish', {}); p.design_id = r.design_id; p.published = 1; modelSel.value = r.design_id || '';
-    refreshMw(); await loadOverview(); toast(r.design_id?.startsWith('plan_') ? 'Als geplantes Produkt angelegt (erscheint unter Produkte)' : 'Als veröffentlicht markiert'); } },
+    applyKind(); refreshMw(); await loadOverview(); toast(r.design_id?.startsWith('plan_') ? 'Als geplantes Produkt angelegt (erscheint unter Produkte)' : 'Als veröffentlicht markiert'); } },
     p.published ? '✓ veröffentlicht' : '↗ MakerWorld-Upload');
+  const mwRow = el('div', { class: 'row', style: 'margin:0' }, suggestBtn, pubBtn);
+  // Exklusiv: Kunde zahlt Aufpreis dafür, dass das Modell NICHT hochgeladen wird
+  // (blendet die MakerWorld-Zuordnung aus + unterdrückt die Upload-Aufgabe).
+  const exclCb = el('input', { type: 'checkbox' }); exclCb.checked = !!p.no_upload;
+  const exclFee = el('input', { type: 'number', step: '0.5', value: p.no_upload_fee ?? 5, style: 'width:64px' });
+  exclFee.disabled = !exclCb.checked;
+  exclCb.onchange = () => { p.no_upload = exclCb.checked; exclFee.disabled = !exclCb.checked; applyKind(); drawRes(); persist(); };
+  exclFee.oninput = () => { p.no_upload_fee = exclFee.value; drawRes(); persist(); };
+  const exclRow = el('div', { class: 'row', style: 'margin:0' },
+    el('label', { style: 'display:flex;align-items:center;gap:6px;min-width:96px' }, exclCb, 'Exklusiv'),
+    el('span', { class: 'muted', style: 'font-size:11px' }, 'Kunde zahlt für „nicht hochladen":'), exclFee, el('span', { class: 'muted' }, '€'));
+  // .3mf-Datei an den Statuslink hängen (nur Modellarbeit) — Kunde kann sie herunterladen
+  const fileInfo = el('span', { class: 'muted', style: 'font-size:11px' }, p.file_name || 'keine Datei');
+  const fileIn = el('input', { type: 'file', accept: '.3mf', style: 'font-size:11px;max-width:150px' });
+  fileIn.onchange = async () => { const f = fileIn.files[0]; if (!f) return;
+    if (!/\.3mf$/i.test(f.name)) return toast('Nur .3mf-Dateien.');
+    fileInfo.textContent = 'lädt …';
+    const data = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(f); });
+    const r = await jpost('/projects/' + id + '/file', { name: f.name, data });
+    if (r.error) { fileInfo.textContent = p.file_name || 'keine Datei'; return toast(r.error); }
+    p.file_name = r.file_name; fileInfo.textContent = p.file_name + ' (' + Math.round(r.size / 1024) + ' KB)'; fileIn.value = ''; toast('3mf angehängt'); };
+  const fileDel = el('button', { class: 'btn sm ghost', onclick: async () => { await api('/projects/' + id + '/file', { method: 'DELETE' }); p.file_name = null; fileInfo.textContent = 'keine Datei'; toast('Datei entfernt'); } }, 'entfernen');
+  const fileRow = el('div', { class: 'row', style: 'margin:0' },
+    el('label', { style: 'min-width:96px' }, '3mf-Datei'), fileIn, fileInfo, fileDel,
+    el('span', { class: 'muted', style: 'font-size:11px' }, '— zum Download im Statuslink'));
+  const artRow = el('div', { class: 'row', style: 'margin:0' }, el('label', { style: 'min-width:96px' }, 'Art'), kindSel,
+    el('span', { class: 'muted', style: 'font-size:11px' }, 'nur Modellarbeit = kein Druck (Statuslink ohne Druck-Schritt)'));
+  const qtyMarginRow = el('div', { class: 'row' }, el('label', { style: 'min-width:96px' }, 'Stückzahl'), qtyI, el('label', { style: 'min-width:96px' }, 'Margen-Stufe'), tierSel);
+  const priceRow = el('div', { class: 'row' }, el('label', { style: 'min-width:96px' }, 'Preis (€)'), priceI, priceHint,
+    el('label', { style: 'margin-left:12px;display:flex;align-items:center;gap:6px' }, paidCb, 'bezahlt'));
   body.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Kalkulation'),
-    el('div', { class: 'bd' },
-      modelRow, el('div', { class: 'row', style: 'margin:0' }, suggestBtn, pubBtn),
-      gInput, phInput, lhInput,
-      el('div', { class: 'row' }, el('label', { style: 'min-width:96px' }, 'Stückzahl'), qtyI, el('label', { style: 'min-width:96px' }, 'Margen-Stufe'), tierSel),
-      el('div', { class: 'row' }, el('label', { style: 'min-width:96px' }, 'Preis (€)'), priceI, priceHint,
-        el('label', { style: 'margin-left:12px;display:flex;align-items:center;gap:6px' }, paidCb, 'bezahlt')))));
+    el('div', { class: 'bd' }, artRow, modelRow, mwRow, gInput, phInput, lhInput, qtyMarginRow, priceRow, exclRow, fileRow)));
 
   // ---- Druckpositionen (mehrere Modelle/Profile mit eigener Stückzahl) ----
   const posHint = el('span', { class: 'muted', style: 'font-weight:400;text-transform:none' }, '');
@@ -1398,10 +1630,32 @@ async function openProject(id) {
     items = r.items || items; posQty.value = 1; drawItems(); drawRes(); loadOverview();
     toast('Position hinzugefügt' + (weight ? ' · ' + Math.round(weight) + ' g/Druck' : ''));
   };
-  body.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Druckpositionen', posHint),
+  const posCard = el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Druckpositionen', posHint),
     el('div', { class: 'bd' }, itemsList,
-      el('div', { class: 'row', style: 'margin-top:8px;flex-wrap:wrap' }, posModel, posProfile, el('span', { class: 'muted' }, '×'), posQty, el('button', { class: 'btn primary sm', onclick: addPos }, '+ Position')))));
+      el('div', { class: 'row', style: 'margin-top:8px;flex-wrap:wrap' }, posModel, posProfile, el('span', { class: 'muted' }, '×'), posQty, el('button', { class: 'btn primary sm', onclick: addPos }, '+ Position'))));
+  body.append(posCard);
   drawItems();
+  // Sichtbarkeit je nach Projekt-Art: bei "nur Modellarbeit" Druck-Felder ausblenden.
+  function applyKind() {
+    const self = !!p.self;
+    const modelOnly = !self && p.kind === 'modell';   // "nur Modellarbeit": kein Druck (nur Kundenprojekte)
+    const showPrint = !modelOnly;
+    gInput.style.display = phInput.style.display = fillFromModel.style.display = showPrint ? '' : 'none';
+    posCard.style.display = showPrint ? '' : 'none';
+    // Kundenspezifisches bei Eigenprojekten komplett ausblenden.
+    artRow.style.display = self ? 'none' : '';
+    qtyMarginRow.style.display = self ? 'none' : '';
+    priceRow.style.display = self ? 'none' : '';
+    exclRow.style.display = (!self && modelOnly) ? '' : 'none';
+    fileRow.style.display = (!self && modelOnly) ? '' : 'none';
+    const exclusive = !!p.no_upload;
+    // MakerWorld-Zuordnung: Eigenprojekt immer (Veröffentlichen ist das Ziel);
+    // bei Modellarbeit erst nach Fertigstellung; nie bei Exklusiv.
+    const showUpload = self ? true : (modelOnly ? (!exclusive && (p.stage === 'fertig' || !!p.design_id)) : true);
+    modelRow.style.display = mwRow.style.display = showUpload ? '' : 'none';
+    modelLabel.textContent = (self || modelOnly) ? 'MW-Upload' : 'Modell';
+  }
+  rebuildStages(); applyKind(); drawPath();
 
   // Teile aus dem Katalog
   const catalog = await api('/parts');
@@ -1431,9 +1685,21 @@ async function openProject(id) {
   body.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Aufgaben'),
     el('div', { class: 'bd' }, tl, el('div', { class: 'row', style: 'margin-top:8px' }, tIn, tDue, el('button', { class: 'btn primary sm', onclick: addT }, '+')))));
 
-  body.append(el('div', { class: 'card' }, el('div', { class: 'bd row' },
-    el('button', { class: 'btn sm', onclick: () => openInvoice(id) }, '🧾 Beleg / Rechnung'),
-    el('button', { class: 'btn sm ghost', onclick: async () => { if (!confirm('Projekt löschen?')) return; const cid = p.contact_id; await api('/projects/' + id, { method: 'DELETE' }); if (cid) openContact(cid); else closeDrawer(); } }, '🗑 Projekt löschen'))));
+  const actionBtns = [];
+  if (!p.self) {   // Beleg + Statuslink nur bei Kundenprojekten
+    actionBtns.push(el('button', { class: 'btn sm', onclick: () => openInvoice(id) }, 'Beleg / Rechnung'),
+      el('button', { class: 'btn sm', title: 'Read-only Status-Seite zum Verschicken (WhatsApp/Mail)', onclick: async () => {
+        const r = await jpost('/crm/projects/' + id + '/share', {});
+        const cfg = await api('/settings').catch(() => ({}));
+        const base = cfg.public_base_url || location.origin;
+        const url = base + '/p/' + r.token;
+        if (!cfg.public_base_url) toast('Tipp: öffentliche Adresse unter „Daten & Pull" setzen — sonst nur lokal erreichbar.');
+        try { await navigator.clipboard.writeText(url); toast('Statuslink kopiert'); } catch { prompt('Statuslink (kopieren & verschicken):', url); }
+        window.open(url, '_blank');
+      } }, 'Statuslink'));
+  }
+  actionBtns.push(el('button', { class: 'btn sm ghost', onclick: async () => { if (!confirm('Projekt löschen?')) return; const cid = p.contact_id; const self = p.self; await api('/projects/' + id, { method: 'DELETE' }); if (self) { closeDrawer(); go('selbst'); } else if (cid) openContact(cid); else closeDrawer(); } }, 'Projekt löschen'));
+  body.append(el('div', { class: 'card' }, el('div', { class: 'bd row' }, ...actionBtns)));
   drawRes();
 }
 
@@ -1444,15 +1710,52 @@ async function renderProjekte() {
   const list = await api('/crm/projects');
   const board = el('div', { class: 'board' });
   PROJECT_STAGES.forEach(([sv, sl]) => {
-    const members = list.filter(p => (p.stage || 'anfrage') === sv);
+    const members = list.filter(p => (p.stage || 'anfrage') === sv).sort((a, b) => (b.priority ?? 1) - (a.priority ?? 1));
     const col = el('div', { class: 'col' }, el('div', { class: 'colhd', style: `border-top:3px solid ${PSTAGE_COLOR[sv]}` }, sl, el('span', { class: 'cnt' }, members.length)));
+    dndColumn(col, sv, async (id, stage) => { await jpost('/projects/' + id, { stage }, 'PUT'); renderProjekte(); });
     members.forEach(p => { const c = p.calc || {};
       const sel = mkSelect(PROJECT_STAGES, sv, 'sm'); sel.onclick = e => e.stopPropagation();
       sel.onchange = async e => { e.stopPropagation(); await jpost('/projects/' + p.id, { stage: sel.value }, 'PUT'); renderProjekte(); };
-      col.append(el('div', { class: 'kcard', onclick: () => openProject(p.id) },
+      const card = el('div', { class: 'kcard', onclick: () => openProject(p.id) },
         el('div', { class: 'kt' }, p.title),
+        el('div', { class: 'krow' }, prioBadge(p.priority), deadlineBadge(p.due_date)),
         el('div', { class: 'muted', style: 'font-size:11px' }, p.contact_name + (p.model_title ? ' · ' + p.model_title : '')),
-        el('div', { class: 'muted num', style: 'font-size:11px' }, c.free ? 'gratis · Verlust ' + eur(c.loss) : `${eur(c.price)} · Kosten ${eur(c.cost)}`), sel)); });
+        el('div', { class: 'muted num', style: 'font-size:11px' }, c.free ? 'gratis · Verlust ' + eur(c.loss) : `${eur(c.price)} · Kosten ${eur(c.cost)}`), sel);
+      dndCard(card, p.id);
+      col.append(card);
+    });
+    if (!members.length) col.append(el('div', { class: 'muted', style: 'padding:8px' }, '—'));
+    board.append(col);
+  });
+  w.append(board);
+}
+
+// ---- Eigenprojekte (kein Kunde): Modellieren → Drucken → Fotos → MW-Eintrag → Veröffentlicht ----
+async function renderSelfProjects() {
+  if (!STATE.overview) await loadOverview();
+  const w = pagehead('Eigenprojekte', 'Eigene Produkte planen: modellieren, drucken, fotografieren, MakerWorld-Eintrag erstellen und veröffentlichen. Ohne Kunde.');
+  const nameI = el('input', { placeholder: 'Neues Eigenprojekt …', style: 'flex:1;min-width:160px' });
+  const prioI = mkSelect(PRIORITIES, '1', 'sm'); const dueI = el('input', { type: 'date' });
+  const add = async () => { if (!nameI.value.trim()) return; const np = await jpost('/projects', { self: 1, title: nameI.value.trim(), priority: +prioI.value, due_date: dueI.value || null }); nameI.value = ''; dueI.value = ''; openProject(np.id); };
+  nameI.addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
+  w.append(el('div', { class: 'toolbar' }, nameI, el('span', { class: 'muted', style: 'font-size:11px' }, 'Prio'), prioI, el('span', { class: 'muted', style: 'font-size:11px' }, 'Deadline'), dueI, el('button', { class: 'btn primary sm', onclick: add }, '+ Eigenprojekt')));
+  const list = await api('/crm/self-projects');
+  const cols = SELF_STAGES.filter(s => s[0] !== 'abgebrochen');
+  const board = el('div', { class: 'board' });
+  cols.forEach(([sv, sl]) => {
+    const members = list.filter(p => (p.stage || 'idee') === sv).sort((a, b) => (b.priority ?? 1) - (a.priority ?? 1));
+    const col = el('div', { class: 'col' }, el('div', { class: 'colhd', style: `border-top:3px solid ${SSTAGE_COLOR[sv]}` }, sl, el('span', { class: 'cnt' }, members.length)));
+    dndColumn(col, sv, async (id, stage) => { await jpost('/projects/' + id, { stage }, 'PUT'); renderSelfProjects(); });
+    members.forEach(p => { const c = p.calc || {};
+      const sel = mkSelect(SELF_STAGES, sv, 'sm'); sel.onclick = e => e.stopPropagation();
+      sel.onchange = async e => { e.stopPropagation(); await jpost('/projects/' + p.id, { stage: sel.value }, 'PUT'); renderSelfProjects(); };
+      const card = el('div', { class: 'kcard', onclick: () => openProject(p.id) },
+        el('div', { class: 'kt' }, p.title),
+        el('div', { class: 'krow' }, prioBadge(p.priority), deadlineBadge(p.due_date)),
+        el('div', { class: 'muted', style: 'font-size:11px' }, (p.model_title ? p.model_title + ' · ' : '') + 'Kosten ' + eur(c.cost) + (p.mw && p.mw.earned ? ' · MW ' + eur(p.mw.earned) : '')), sel);
+      dndCard(card, p.id);
+      col.append(card);
+    });
     if (!members.length) col.append(el('div', { class: 'muted', style: 'padding:8px' }, '—'));
     board.append(col);
   });
@@ -1461,7 +1764,7 @@ async function renderProjekte() {
 
 // ---- Teile-Katalog + Kalkulations-Einstellungen ----
 async function renderParts() {
-  const w = pagehead('Teile & Kalkulation', 'Teile-Katalog (deine „SAP") und globale Kalkulations-Parameter für die Preisberechnung.');
+  const w = pagehead('Teile & Kalkulation', 'Bauteil-Katalog und globale Kalkulationsparameter für die Preisbildung.');
   const s = await api('/crm/settings');
   // Kalkulations-Einstellungen
   const fI = el('input', { type: 'number', step: '0.5', value: s.filament_price_kg, style: 'width:80px' });
@@ -1507,10 +1810,94 @@ async function renderParts() {
 }
 
 // ============ DATEN & PULL ============
+// ---- Druckplan (offene Druckpositionen über alle Projekte) ----
+async function renderDruckplan() {
+  const w = pagehead('Druckplan', 'Alle offenen Druckpositionen über alle Projekte — was als Nächstes zu drucken ist. Nutzt die Druckpositionen der Projekte.');
+  const d = await api('/crm/production');
+  const sp = await api('/spools');
+  const stat = (v, l, cls, dd) => el('div', { class: 'stat' }, el('div', { class: 'v ' + (cls || '') }, v), el('div', { class: 'l' }, l), dd ? el('div', { class: 'd muted' }, dd) : null);
+  w.append(el('div', { class: 'stats' },
+    stat(fmt(d.summary.prints), 'Drucke offen'),
+    stat(fmt(d.summary.jobs), 'Positionen'),
+    stat(fmt(d.summary.g) + ' g', 'Filament nötig', d.enoughStock ? '' : 'neg'),
+    stat(fmt1(d.summary.h) + ' h', 'Druckzeit gesamt'),
+    stat(fmt(d.stockG) + ' g', 'Lagerbestand', d.enoughStock ? 'pos' : 'neg', d.enoughStock ? 'reicht' : 'zu wenig')));
+  if (!d.jobs.length) { w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Keine offenen Drucke'), el('div', { class: 'bd muted' }, 'Alles gedruckt — oder es sind noch keine Druckpositionen in Projekten angelegt (Projekt öffnen → „Druckpositionen").'))); return; }
+  const wrap = el('div', { class: 'tablewrap' });
+  const tb = el('table', {}, el('thead', {}, el('tr', {}, ['Projekt', 'Position', 'offen', 'g/Druck', 'Zeit/Druck', 'Σ Filament', 'Spule abbuchen', '', ''].map((h, i) => el('th', { class: (i > 1 && i < 6) ? 'n' : '' }, h)))));
+  const body = el('tbody', {}); tb.append(body);
+  d.jobs.forEach(j => {
+    const spoolSel = el('select', {}, el('option', { value: '' }, 'ohne Abbuchung'),
+      ...sp.spools.map(s => el('option', { value: s.id }, `${s.material} ${s.color} · ${Math.round(s.remaining_g)}g`)));
+    body.append(el('tr', {},
+      el('td', { class: 'title', style: 'cursor:pointer', onclick: () => openProject(j.project_id) }, j.project_title, el('span', { class: 'muted' }, ' · ' + j.contact_name)),
+      el('td', {}, j.label || j.model_title || 'Position', j.need_ams ? el('span', { class: 'pill', style: 'margin-left:6px' }, 'AMS') : null),
+      el('td', { class: 'n' }, `${j.remaining}/${j.qty}`),
+      el('td', { class: 'n' }, j.weight_g ? fmt(j.weight_g) + ' g' : '–'),
+      el('td', { class: 'n' }, j.print_min ? fmt1(j.print_min / 60) + ' h' : '–'),
+      el('td', { class: 'n' }, fmt(j.g_total) + ' g'),
+      el('td', {}, spoolSel),
+      el('td', {}, el('button', { class: 'btn sm primary', onclick: async () => {
+        const r = await jpost('/crm/production/print', { item_id: j.id, spool_id: spoolSel.value || null });
+        toast('Druck verbucht' + (r.spool ? ` · ${Math.round(r.spool.remaining_g)} g Rest auf Spule` : '')); renderDruckplan();
+      } }, '✓ gedruckt')),
+      el('td', {}, el('button', { class: 'btn sm ghost', title: 'Zurücknehmen', onclick: async () => { await jpost('/crm/production/unprint', { item_id: j.id }); renderDruckplan(); } }, '−'))));
+  });
+  wrap.append(tb);
+  w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Offene Drucke', el('a', { onclick: () => go('material'), style: 'font-weight:400;text-transform:none;font-size:11px' }, 'Filament-Lager →')), wrap));
+}
+
+// ---- Filament-Lager (Spulen) ----
+async function renderMaterial() {
+  const w = pagehead('Filament-Lager', 'Spulen mit Restgewicht. Beim Verbuchen eines Drucks im Druckplan wird automatisch abgebucht.');
+  const d = await api('/spools');
+  const totRem = d.spools.reduce((a, s) => a + (s.remaining_g || 0), 0);
+  const low = d.spools.filter(s => (s.remaining_g || 0) <= d.low_g);
+  w.append(el('div', { class: 'stats' },
+    el('div', { class: 'stat' }, el('div', { class: 'v' }, fmt(d.spools.length)), el('div', { class: 'l' }, 'Spulen')),
+    el('div', { class: 'stat' }, el('div', { class: 'v' }, fmt(Math.round(totRem)) + ' g'), el('div', { class: 'l' }, 'Rest gesamt'), el('div', { class: 'd muted' }, fmt1(totRem / 1000) + ' kg')),
+    el('div', { class: 'stat' }, el('div', { class: 'v ' + (low.length ? 'neg' : 'pos') }, fmt(low.length)), el('div', { class: 'l' }, 'niedrig'), el('div', { class: 'd muted' }, '≤ ' + d.low_g + ' g'))));
+  const list = el('div');
+  const draw = () => { list.innerHTML = ''; if (!d.spools.length) list.append(el('div', { class: 'muted' }, 'Noch keine Spulen erfasst. Unten eine Spule anlegen.'));
+    d.spools.forEach(s => {
+      const pctv = s.total_g ? Math.max(0, Math.min(100, Math.round((s.remaining_g / s.total_g) * 100))) : 0;
+      const isLow = (s.remaining_g || 0) <= d.low_g;
+      const remI = el('input', { type: 'number', value: Math.round(s.remaining_g || 0), style: 'width:74px' });
+      remI.onchange = async () => { await jpost('/spools/' + s.id, { remaining_g: +remI.value }, 'PUT'); s.remaining_g = +remI.value; draw(); };
+      list.append(el('div', { class: 'checkline', style: 'gap:10px;flex-wrap:wrap' + (isLow ? ';background:rgba(193,51,45,.06)' : '') },
+        el('span', { style: `width:16px;height:16px;border-radius:50%;border:1px solid #bbb;background:${s.hex || '#ddd'}` }),
+        el('span', { style: 'min-width:150px;flex:1' }, el('b', {}, s.material + ' · ' + s.color), s.brand ? el('span', { class: 'muted' }, ' · ' + s.brand) : null,
+          isLow ? el('span', { class: 'tag', style: 'background:var(--neg);margin-left:6px' }, 'niedrig') : null),
+        el('div', { class: 'goalbar', style: 'width:120px' }, el('i', { style: `width:${pctv}%;background:${isLow ? 'var(--neg)' : 'var(--pos)'}` }), el('span', {}, pctv + '%')),
+        remI, el('span', { class: 'muted', style: 'font-size:11px' }, '/ ' + Math.round(s.total_g || 0) + ' g'),
+        el('button', { class: 'btn sm ghost', onclick: async () => { if (!confirm('Spule „' + s.material + ' ' + s.color + '" löschen?')) return; await api('/spools/' + s.id, { method: 'DELETE' }); renderMaterial(); } }, '✕')));
+    }); };
+  draw();
+  w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Bestand', el('a', { onclick: () => go('druckplan'), style: 'font-weight:400;text-transform:none;font-size:11px' }, '← Druckplan')), el('div', { class: 'bd' }, list)));
+  // Neue Spule
+  const mat = mkSelect([['PLA', 'PLA'], ['PETG', 'PETG'], ['ABS', 'ABS'], ['ASA', 'ASA'], ['TPU', 'TPU'], ['PLA-CF', 'PLA-CF'], ['Sonstiges', 'Sonstiges']], 'PLA');
+  const col = el('input', { placeholder: 'Farbe (z.B. Schwarz)', style: 'flex:1;min-width:120px' });
+  const hex = el('input', { type: 'color', value: '#222222', style: 'width:40px;padding:0' });
+  const brand = el('input', { placeholder: 'Marke', style: 'width:110px' });
+  const tot = el('input', { type: 'number', value: 1000, style: 'width:80px' });
+  const cost = el('input', { type: 'number', step: '0.01', placeholder: '€', style: 'width:70px' });
+  const add = async () => { if (!col.value.trim()) return toast('Farbe angeben.');
+    await jpost('/spools', { material: mat.value, color: col.value.trim(), hex: hex.value, brand: brand.value || null, total_g: +tot.value || 1000, remaining_g: +tot.value || 1000, cost: +cost.value || 0 });
+    renderMaterial(); };
+  w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Spule hinzufügen'),
+    el('div', { class: 'bd' }, el('div', { class: 'row', style: 'flex-wrap:wrap' }, mat, col, hex, brand, tot, el('span', { class: 'muted' }, 'g'), cost, el('span', { class: 'muted' }, '€'), el('button', { class: 'btn primary sm', onclick: add }, '+ Spule')))));
+}
+
 async function renderData() {
   const s = await api('/settings');
   const login = await api('/login/status').catch(() => ({ error: 'x' }));
-  const w = pagehead('Daten & Pull', 'Live-Daten holen, Zeitplan setzen, Alt-Export importieren.');
+  const w = pagehead('Daten & Pull', 'Datenabruf, Zeitplanung und Import.');
+  // Sprache / Language
+  const langSel = mkSelect([['de', 'Deutsch'], ['en', 'English']], LANG.cur);
+  langSel.onchange = () => setLang(langSel.value);
+  w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Sprache / Language'),
+    el('div', { class: 'bd' }, el('div', { class: 'row' }, el('label', { style: 'min-width:150px' }, 'Sprache'), langSel,
+      el('span', { class: 'muted', style: 'font-size:11px' }, 'Umschalten zwischen Deutsch (Fachbegriffe) und Englisch.')))));
   const loginBadge = login.loggedIn ? el('span', { class: 'tag ok' }, 'eingeloggt' + (login.handle ? ' @' + login.handle : '')) : el('span', { class: 'tag err' }, 'nicht eingeloggt');
   const loginLog = el('div', { class: 'log', style: 'display:none' });
   w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, '1) MakerWorld-Login', loginBadge),
@@ -1542,6 +1929,29 @@ async function renderData() {
         el('button', { class: 'btn ghost', onclick: async () => { const r = await api('/digest/send', { method: 'POST' }); toast('Digest gesendet.'); } }, 'Jetzt senden')),
       el('div', { class: 'log', style: 'margin-top:8px' }, dg.current))));
 
+  // Wochen-Report (Insights) + Meilensteine
+  const wkEn = el('input', { type: 'checkbox' }); wkEn.checked = s.weekly_enabled;
+  const wkDay = el('select', {}, [[1, 'Montag'], [2, 'Dienstag'], [3, 'Mittwoch'], [4, 'Donnerstag'], [5, 'Freitag'], [6, 'Samstag'], [0, 'Sonntag']].map(([v, l]) => el('option', { value: v }, l)));
+  wkDay.value = String(s.weekly_day ?? 1);
+  const wkTime = el('input', { type: 'time', value: s.weekly_time || '08:00' });
+  const lowI = el('input', { type: 'number', value: s.spool_low_g ?? 150, style: 'width:80px' });
+  w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, '5) Wochen-Report & Alerts'),
+    el('div', { class: 'bd' },
+      el('p', { class: 'muted' }, 'Wöchentliche Insights (Zugpferd, CTR-Chancen, Gutschein-Prognose, stärkste Tags) als Push. Meilensteine (1000 Downloads, Gutschein-Schwelle, „kalt gewordene" Modelle) werden nach jedem Pull automatisch gepusht.'),
+      el('div', { class: 'row' }, wkEn, el('span', {}, 'Wochen-Report aktiv —'), wkDay, el('span', {}, 'um'), wkTime,
+        el('button', { class: 'btn', onclick: async () => { await jpost('/settings', { weekly_enabled: wkEn.checked, weekly_day: +wkDay.value, weekly_time: wkTime.value }); toast('Gespeichert.'); } }, 'Speichern'),
+        el('button', { class: 'btn ghost', onclick: async () => { const r = await api('/insights/send', { method: 'POST' }); toast(r.sent ? 'Wochen-Report gesendet.' : 'Erstellt (keine Push-URL — Vorschau unten).'); } }, 'Jetzt senden')),
+      el('div', { class: 'row' }, el('label', { style: 'min-width:180px' }, 'Filament-Warnung ab (g)'), lowI,
+        el('button', { class: 'btn', onclick: async () => { await jpost('/settings', { spool_low_g: +lowI.value }); toast('Gespeichert.'); } }, 'Speichern')))));
+
+  // Öffentlicher Statuslink (Basis-Adresse für verschickte Links)
+  const pubI = el('input', { value: s.public_base_url || '', placeholder: 'z.B. https://dein-host.dein-tailnet.ts.net:8443', style: 'flex:1;min-width:260px' });
+  w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, '6) Öffentlicher Statuslink'),
+    el('div', { class: 'bd' },
+      el('p', { class: 'muted' }, 'Adresse, unter der die Auftrags-Statusseite von außen erreichbar ist (nur die Statusseite, nicht das Dashboard). Wird für die „Statuslink"-Buttons verwendet. Leer = nur lokal.'),
+      el('div', { class: 'row' }, el('label', { style: 'min-width:110px' }, 'Basis-URL'), pubI,
+        el('button', { class: 'btn', onclick: async () => { await jpost('/settings', { public_base_url: pubI.value }); toast('Gespeichert.'); } }, 'Speichern')))));
+
   // Punkte-Wert (Verdienst-Umrechnung)
   const curRate = s.eur_per_point || (40 / 524);
   const ptsI = el('input', { type: 'number', value: 524, style: 'width:90px' });
@@ -1567,15 +1977,15 @@ let pollTimer = null, wasRunning = false;
 async function pollPull() {
   const st = await api('/pull/status');
   const side = $('#pullStatus'), btn = $('#pullBtn'), box = $('#pullLog');
-  if (st.running) { wasRunning = true; btn.disabled = true; btn.textContent = 'Pull läuft …'; side.textContent = st.log.slice(-4).join('\n'); if (box) box.textContent = st.log.join('\n'); if (!pollTimer) pollTimer = setInterval(pollPull, 1500); }
-  else { btn.disabled = false; btn.textContent = 'Live-Pull starten'; if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-    if (st.lastResult) side.textContent = st.lastResult.ok ? `✓ ${st.lastResult.ok} Modelle aktualisiert` : ('✗ ' + st.lastResult.error);
+  if (st.running) { wasRunning = true; btn.disabled = true; btn.textContent = t('Pull läuft …'); side.textContent = st.log.slice(-4).join('\n'); if (box) box.textContent = st.log.join('\n'); if (!pollTimer) pollTimer = setInterval(pollPull, 1500); }
+  else { btn.disabled = false; btn.textContent = t('Live-Pull starten'); if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    if (st.lastResult) side.textContent = st.lastResult.ok ? `✓ ${st.lastResult.ok} ${t('Modelle aktualisiert')}` : ('✗ ' + st.lastResult.error);
     if (box && st.log.length) box.textContent = st.log.join('\n');
     if (wasRunning) { wasRunning = false; await loadOverview(); const cur = location.hash.slice(1) || 'overview'; if (routes[cur]) go(cur); } else renderLastPull();
   }
 }
 $('#pullBtn').addEventListener('click', triggerPull);
-function renderLastPull() { const lp = STATE.overview?.lastPull; $('#lastPull').textContent = lp ? `Pull ${nice(lp.finished_at || lp.started_at)}\n${lp.status} · ${lp.models_ok ?? 0}/${(lp.models_ok ?? 0) + (lp.models_failed ?? 0)}` : 'Kein Pull'; }
+function renderLastPull() { const lp = STATE.overview?.lastPull; $('#lastPull').textContent = lp ? `${t('Pull')} ${nice(lp.finished_at || lp.started_at)}\n${lp.status} · ${lp.models_ok ?? 0}/${(lp.models_ok ?? 0) + (lp.models_failed ?? 0)}` : t('Kein Pull'); }
 
 // ---- Helpers ----
 function chartOpts() {
@@ -1585,6 +1995,157 @@ function chartOpts() {
 }
 function toast(msg) { const t = el('div', { style: 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#1a1c1f;color:#fff;border:1px solid #000;padding:8px 16px;z-index:99;font-size:12px' }, msg); document.body.append(t); setTimeout(() => t.remove(), 2600); }
 
+// ---- Wörterbuch Deutsch -> Englisch (Quelle im Code ist Deutsch) ----------
+const TR = {
+  // Seitentitel
+  'Übersicht': 'Overview', 'Momentum': 'Momentum', 'Vergleich': 'Comparison', 'Kategorien & Gruppen': 'Categories & Groups',
+  'Punkte-Ökonomie': 'Points Economy', 'Bericht': 'Report', 'Aufgaben': 'Tasks', 'Pipeline': 'Pipeline',
+  'Änderungs-Historie': 'Change History', 'Heute': 'Today', 'Kunden': 'Customers', 'Leads': 'Leads',
+  'Finanzen': 'Finance', 'Projekte': 'Projects', 'Teile & Kalkulation': 'Parts & Costing', 'Druckplan': 'Print Queue',
+  'Filament-Lager': 'Filament Stock', 'Daten & Pull': 'Data & Sync', 'Produkte': 'Products', 'Kategorien': 'Categories', 'Punkte': 'Points',
+  // Untertitel
+  'Was gerade läuft — 7/30-Tage-Aktivität, Trend gegenüber Vorwoche.': 'Current activity — 7/30-day performance, trend vs. previous week.',
+  'Modelle überlagern — nach Datum oder nach Alter seit Release.': 'Overlay models — by date or by age since release.',
+  'Aggregierte Leistung nach Kategorie, Tag oder eigener Gruppe.': 'Aggregated performance by category, tag or custom group.',
+  'Echter Kontostand, Punkte über die Zeit und je Modell. Punkte = Basis der Auszahlung.': 'Actual balance, points over time and per model. Points are the payout basis.',
+  'Wochenrückblick — Bewegung der letzten 7 Tage, Prognose und offene Punkte.': 'Weekly review — last 7 days, forecast and open items.',
+  'Aufgaben je Modell und global — zentral gebündelt.': 'Tasks per model and global — in one place.',
+  'Von der Idee bis Archiviert. Geplante Produkte werden beim Pull automatisch mit dem echten Modell verschmolzen (Titel-Abgleich).': 'From idea to archived. Planned products merge with the real model on sync (title match).',
+  'Alle erfassten Upload-Änderungen chronologisch. Einträge pro Modell im Detail.': 'All recorded upload changes in chronological order. Per-model detail.',
+  'Tagesübersicht: offene Zahlungen, fällige Aufgaben, Hinweise und Änderungen.': 'Daily overview: open payments, due tasks, alerts and changes.',
+  'Kontakte, Projekte und Aufträge im CRM.': 'Contacts, projects and orders in the CRM.',
+  'Pipeline von Neu bis Gewonnen/Verloren — Stufe je Karte änderbar.': 'Pipeline from New to Won/Lost — stage editable per card.',
+  'Umsatz aus Projekten, MakerWorld-Auszahlungen, Ausgaben und Gewinn/Verlust.': 'Revenue from projects, MakerWorld payouts, expenses and profit/loss.',
+  'Von der Anfrage bis Fertig. Die Phase „Modellieren" lässt sich überspringen (direkt auf Drucken).': 'From request to done. The "Modeling" stage can be skipped (straight to printing).',
+  'Bauteil-Katalog und globale Kalkulationsparameter für die Preisbildung.': 'Parts catalog and global costing parameters for pricing.',
+  'Alle offenen Druckpositionen über alle Projekte — was als Nächstes zu drucken ist. Nutzt die Druckpositionen der Projekte.': 'All open print items across projects — what to print next. Uses the projects\' print items.',
+  'Spulen mit Restgewicht. Beim Verbuchen eines Drucks im Druckplan wird automatisch abgebucht.': 'Spools with remaining weight. Booking a print in the queue deducts automatically.',
+  'Datenabruf, Zeitplanung und Import.': 'Data sync, scheduling and import.',
+  // Navigation / Sidebar
+  'Analyse': 'Analysis', 'CRM': 'CRM', 'Produktion': 'Production', 'System': 'System',
+  'Suche (Modelle, Kunden, Projekte)': 'Search (models, customers, projects)',
+  'Live-Pull starten': 'Start live sync', 'Pull läuft …': 'Sync running …', 'Kein Pull': 'No sync yet', 'Pull': 'Sync', 'Modelle aktualisiert': 'models updated',
+  // Status / Phasen / Quellen / Kategorien
+  'Idee': 'Idea', 'In Arbeit': 'In progress', 'Live': 'Live', 'Update geplant': 'Update planned', 'Archiviert': 'Archived',
+  'Neu': 'New', 'Kontaktiert': 'Contacted', 'Angebot': 'Quote', 'Gewonnen': 'Won', 'Verloren': 'Lost',
+  'Freund': 'Friend', 'Empfehlung': 'Referral', 'Manuell': 'Manual',
+  'Anfrage': 'Request', 'Modellieren': 'Modeling', 'Drucken': 'Printing', 'Fertig': 'Done', 'Abgebrochen': 'Cancelled',
+  'Angefragt': 'Requested', 'Bestätigt': 'Confirmed', 'Versendet': 'Shipped', 'Bezahlt': 'Paid', 'Storniert': 'Cancelled', 'Offen': 'Open',
+  'Magnet': 'Magnet', 'Schraube': 'Screw', 'Metallteil': 'Metal part', 'Elektronik': 'Electronics', 'Sonstiges': 'Other',
+  'Filament': 'Filament', 'Drucker': 'Printer', 'Zubehör': 'Accessories', 'Versand': 'Shipping',
+  'Standard': 'Standard', 'Freunde': 'Friends', 'Kostenlos (nur Material)': 'Free (material only)',
+  'nur Modellarbeit': 'Modeling only', 'Modell + Druck': 'Model + Print',
+  'Gesammelt': 'Collected', 'Drucke': 'Prints',
+  // Wochentage
+  'Montag': 'Monday', 'Dienstag': 'Tuesday', 'Mittwoch': 'Wednesday', 'Donnerstag': 'Thursday', 'Freitag': 'Friday', 'Samstag': 'Saturday', 'Sonntag': 'Sunday',
+  // Karten-Überschriften
+  'Insights': 'Insights', 'Meilensteine': 'Milestones', 'Alerts': 'Alerts', 'Kalkulation': 'Costing', 'Druckpositionen': 'Print items',
+  'Einzelteile': 'Parts', 'Stammdaten': 'Master data', 'Aufgaben / Follow-ups': 'Tasks / follow-ups', 'Ziele & Gruppe': 'Goals & group',
+  'Notizen': 'Notes', 'Verlauf': 'Trend', 'Prognose (Trend, letzte 90 Tage)': 'Forecast (trend, last 90 days)', 'Beschreibung': 'Description',
+  'Quelle des Datenverkehrs': 'Traffic source', 'Wirkung von Änderungen (CTR ±21 Tage)': 'Effect of changes (CTR ±21 days)',
+  'Kalkulations-Parameter': 'Costing parameters', 'Bestand': 'Stock', 'Spule hinzufügen': 'Add spool', 'Offene Drucke': 'Open prints',
+  'Gewinn & Verlust': 'Profit & Loss', 'Ausgaben': 'Expenses', 'Punkte-Auszahlungen (Gutscheine)': 'Point payouts (vouchers)',
+  'Rechnungs-Absender (für Belege)': 'Invoice sender (for documents)', 'Punkte-Wert (Verdienst)': 'Point value (earnings)',
+  'Monatsumsatz (bezahlt)': 'Monthly revenue (paid)', 'Nach Quelle': 'By source', 'Top-Kunden': 'Top customers', 'Umsatz je Modell': 'Revenue per model',
+  'Projekte → MakerWorld-Ertrag': 'Projects → MakerWorld earnings', 'Gratis-Projekte, die auf MakerWorld verdienen': 'Free projects earning on MakerWorld',
+  'Sprache / Language': 'Language', 'Sprache': 'Language', 'Automatischer Tages-Pull': 'Automatic daily sync',
+  'Täglicher Digest / Benachrichtigung': 'Daily digest / notification', 'Wochen-Report & Alerts': 'Weekly report & alerts',
+  'Öffentlicher Statuslink': 'Public status link', 'Alt-Export importieren': 'Import legacy export', 'Keine Aufgaben.': 'No tasks.',
+  // Kennzahlen / Stat-Labels
+  'Material (Sach)': 'Material (cash)', 'Preis': 'Price', 'Gewinn direkt': 'Direct profit', 'MakerWorld-Ertrag': 'MakerWorld earnings',
+  'Gesamtbilanz': 'Total result', 'Preisvorschlag': 'Suggested price', 'Verlust': 'Loss', 'Materialkosten': 'Material cost',
+  'Direkteinnahmen': 'Direct revenue', 'Umsatz bezahlt': 'Revenue (paid)', 'offen (Pipeline)': 'open (pipeline)', 'gesamt': 'total',
+  'Kontakte': 'Contacts', 'Drucke offen': 'Prints open', 'Positionen': 'Items', 'Filament nötig': 'Filament needed',
+  'Druckzeit gesamt': 'Total print time', 'Lagerbestand': 'Stock', 'Spulen': 'Spools', 'Rest gesamt': 'Remaining total', 'niedrig': 'low',
+  'Einnahmen (Projekte)': 'Revenue (projects)', 'MakerWorld-Auszahlungen': 'MakerWorld payouts', 'Netto-Gewinn': 'Net profit',
+  'Punkte offen': 'Points open', 'Verlust (Gratis)': 'Loss (free)', 'aus verknüpften Modellen': 'from linked models',
+  'direkt + MakerWorld': 'direct + MakerWorld', 'direkt − Material + MW': 'direct − material + MW', 'noch nicht ausgezahlt': 'not yet paid out',
+  // Spalten
+  'Name': 'Name', 'Quelle': 'Source', 'Stufe': 'Stage', 'Best.': 'Ord.', 'Umsatz': 'Revenue', 'bezahlt': 'paid', 'letzte Best.': 'last order',
+  'Datum': 'Date', 'Kategorie': 'Category', 'Betrag': 'Amount', 'Notiz': 'Note', 'Menge': 'Qty', 'Position': 'Item', 'Modell': 'Model',
+  'Kunde': 'Customer', 'Proj.': 'Proj.', 'Einheit': 'Unit', 'Marke': 'Brand', 'Farbe': 'Color', 'MakerWorld €': 'MakerWorld €', 'netto': 'net',
+  // Buttons
+  'Speichern': 'Save', 'Beleg / Rechnung': 'Receipt / Invoice', 'Statuslink': 'Status link', 'Projekt löschen': 'Delete project',
+  'Kunde löschen': 'Delete customer', 'Vorschlag': 'Suggest', '+ Position': '+ Item', '+ Teil': '+ Part', '+ Projekt': '+ Project',
+  '+ Ausgabe': '+ Expense', '+ Auszahlung': '+ Payout', '+ Spule': '+ Spool', 'Jetzt senden': 'Send now', 'Jetzt ziehen': 'Sync now',
+  'Login-Fenster öffnen': 'Open login window', 'Standard-Export importieren': 'Import standard export', 'Zurücknehmen': 'Undo',
+  'Katalog verwalten →': 'Manage catalog →', 'Filament-Lager →': 'Filament stock →', '← Druckplan': '← Print queue',
+  'Spule abbuchen': 'Deduct spool', 'ohne Abbuchung': 'no deduction', '⤵ aus Modell': '⤵ from model',
+  '↗ MakerWorld-Upload': '↗ MakerWorld upload', '✓ veröffentlicht': '✓ published', '✓ gedruckt': '✓ printed',
+  '＋ Kunde': '＋ Customer', '＋ Lead': '＋ Lead', 'Bericht →': 'Report →', 'CSV': 'CSV',
+  // Toasts / Meldungen
+  'Gespeichert.': 'Saved.', 'Absender gespeichert.': 'Sender saved.', 'Kalkulation gespeichert.': 'Costing saved.', 'Preis aktualisiert.': 'Price updated.',
+  'Statuslink kopiert': 'Status link copied', 'Position hinzugefügt': 'Item added', 'Druck verbucht': 'Print booked', 'Digest gesendet.': 'Digest sent.',
+  'Wochen-Report gesendet.': 'Weekly report sent.', 'Erst ein Modell wählen.': 'Select a model first.', 'Kein passendes Modell gefunden.': 'No matching model found.',
+  'Farbe angeben.': 'Enter a color.', 'Bitte gültige Werte.': 'Please enter valid values.', 'Keine Tabelle gefunden.': 'No table found.',
+  'Popup blockiert — bitte Popups erlauben.': 'Popup blocked — please allow popups.', 'läuft schon': 'already running',
+  'Als geplantes Produkt angelegt (erscheint unter Produkte)': 'Created as a planned product (appears under Products)', 'Als veröffentlicht markiert': 'Marked as published',
+  // Leerzustände / Hinweise
+  'Keine Ausgaben.': 'No expenses.', 'Keine Auszahlungen.': 'No payouts.', 'Keine Projekte.': 'No projects.', 'Keine Teile.': 'No parts.',
+  'Keine offenen Drucke': 'No open prints', 'Noch keine Spulen erfasst. Unten eine Spule anlegen.': 'No spools yet. Add one below.', 'kein Modell verknüpft': 'no model linked',
+  'Aus Druckpositionen berechnet': 'Calculated from print items', 'Filament & Druckzeit werden aus den Positionen summiert.': 'Filament & print time are summed from the items.',
+  'nur Modellarbeit = kein Druck (Statuslink ohne Druck-Schritt)': 'modeling only = no print (status link without print step)', 'Klick = Kalkulation': 'Click = costing',
+  // Einstellungen
+  'Push-URL': 'Push URL', 'Basis-URL': 'Base URL', 'Filament-Warnung ab (g)': 'Filament warning below (g)', 'Wochen-Report aktiv —': 'Weekly report active —',
+  'aktiv, täglich um': 'active, daily at', 'Historie ab': 'History from', 'Umschalten zwischen Deutsch (Fachbegriffe) und Englisch.': 'Switch between German (technical terms) and English.',
+  'eingeloggt': 'logged in', 'nicht eingeloggt': 'not logged in', '1) MakerWorld-Login': '1) MakerWorld login', '2) Live-Pull': '2) Live sync',
+  '3) Automatischer Tages-Pull': '3) Automatic daily sync', '4) Täglicher Digest / Benachrichtigung': '4) Daily digest / notification',
+  '5) Wochen-Report & Alerts': '5) Weekly report & alerts', '6) Öffentlicher Statuslink': '6) Public status link',
+  // Formular-Labels / Diverses
+  'Art': 'Type', 'Handle': 'Handle', 'E-Mail': 'Email', 'Telefon': 'Phone', 'Tags': 'Tags', 'Tags, Komma': 'Tags, comma', 'Adresse': 'Address',
+  'Steuer-Hinweis': 'Tax note', 'Stückzahl': 'Quantity', 'Margen-Stufe': 'Margin tier', 'Arbeitszeit (h)': 'Labor time (h)', 'Druckzeit (h)': 'Print time (h)',
+  'Filament (g)': 'Filament (g)', 'Preis (€)': 'Price (€)', 'Exklusiv': 'Exclusive', 'Profil': 'Profile', 'Gramm': 'Grams', 'Stunden': 'Hours',
+  'Eigener Druck': 'Own print', 'Summe': 'Total', 'Phase': 'Phase', 'MW-Upload': 'MW upload', 'Gratis-Projekt': 'Free project', 'offene Leads': 'open leads',
+  'gratis': 'free', 'zu wenig': 'not enough', '— Modell (optional) —': '— Model (optional) —', '— Teil wählen —': '— Select part —', 'Teil': 'Part',
+  'Neues Projekt …': 'New project …', 'Aufgabe zum Projekt …': 'Task for project …', 'z.B. Rückruf, Lieferung …': 'e.g. callback, delivery …',
+  'Farbe (z.B. Schwarz)': 'Color (e.g. black)', 'Notizen …': 'Notes …', 'Öffne Fenster …': 'Opening window …', 'starte …': 'starting …',
+  'Rest gesamt': 'Remaining total', 'Preis runden': 'Round price', 'keine Rundung': 'no rounding', 'Kalkulations-Parameter': 'Costing parameters',
+  'Projekt löschen?': 'Delete project?', 'Kunde inkl. Projekte & Bestellungen löschen?': 'Delete customer incl. projects & orders?',
+  'Öffnet ein echtes Chrome-Fenster. Oben rechts „Sign In", normal anmelden (Passkey funktioniert). Login wird gespeichert.': 'Opens a real Chrome window. Click "Sign In" top right and log in normally (passkey works). The login is saved.',
+  'Läuft solange der Server läuft. Auf dem Pi als Dienst dauerhaft.': 'Runs while the server runs. Permanent as a service on the Pi.',
+  // Präfixe für "Label (N …)"-Überschriften (siehe t()-Fallback)
+  'Druckprofile': 'Print profiles', 'Verknüpfte Projekte': 'Linked projects', 'Bilder': 'Images',
+  'Projekt-Kalkulation': 'Project costing', 'Wirkung von Änderungen': 'Effect of changes', 'Modelle': 'models',
+  'Monatlich: Einnahmen/Auszahlungen vs. Ausgaben': 'Monthly: revenue/payouts vs. expenses', 'Summe': 'Total',
+  // Modell-Detail
+  'Todos': 'Tasks', 'täglich': 'daily', 'kumuliert': 'cumulative', 'autospeichern': 'auto-save', 'Gesamt': 'Total',
+  'Änderungs-Timeline': 'Change timeline', 'Umrechnungskurse': 'Conversion rates', 'Impr': 'Impr', 'DL': 'DL',
+  'Verdient (Lifetime)': 'Earned (lifetime)', 'Kommentare': 'Comments', '1 Jahr': '1 year', '1 Monat': '1 month',
+  'Was geändert?': 'What changed?', 'Notiz (optional)': 'Note (optional)', '+ Eintrag': '+ Entry',
+  'automatisch erkannt': 'auto-detected', 'öffnen': 'open', 'Ziele & Gruppe': 'Goals & group', 'Gruppe': 'Group',
+  'Speichern': 'Save', 'Status': 'Status', 'Release': 'Release', 'zuletzt bearbeitet': 'last edited',
+  // Heute-Kacheln + Insight-Titel (Fließtext dahinter bleibt datengetrieben)
+  'offene Zahlungen': 'open payments', 'überfällige Aufgaben': 'overdue tasks', 'offene Aufgaben': 'open tasks',
+  'Zugpferd': 'Top performer', 'CTR-Chance': 'CTR opportunity', 'Nächster Gutschein': 'Next voucher',
+  'Stärkster Tag': 'Strongest tag', 'Top-Verdiener': 'Top earner', 'Verliert an Fahrt': 'Losing momentum',
+  // Path-Leiste / Produkt-Detail-Aktionen
+  'Stufe abschließen': 'Complete stage', 'Abgeschlossen': 'Completed', 'Abschlussdatum': 'Close date',
+  'Duplizieren': 'Clone', 'Löschen': 'Delete', 'Dupliziert': 'Cloned', 'Gelöscht': 'Deleted',
+  'Abschlussdatum gespeichert': 'Close date saved', 'Geplantes Produkt löschen?': 'Delete planned product?',
+  'Modell samt lokaler Daten löschen? (Kommt beim nächsten Pull ggf. wieder.)': 'Delete model incl. local data? (May return on the next sync.)',
+  'Klicken zum Bearbeiten': 'Click to edit', 'Als geplantes Produkt duplizieren': 'Clone as a planned product',
+  // Punkte-Matrix
+  'Punkte-Matrix (Reverse Engineering)': 'Points Matrix (Reverse Engineering)', 'Punkte / Download': 'Points / download',
+  'Punkte / Druck': 'Points / print', 'Prognose Punkte · 30 T': 'Forecast points · 30 d', 'Datenpunkte (Tage)': 'Data points (days)',
+  'Herkunft der Punkte (Lifetime)': 'Source of points (lifetime)', 'Modell (Downloads)': 'Model (downloads)',
+  'Druckprofil (Drucke)': 'Print profile (prints)', 'Bewertungen': 'Ratings', 'Sonstige': 'Other',
+  'Punkte-Timing & Prognose je Modell': 'Point timing & forecast per model', 'Punkte-Tage': 'Point days',
+  'Ø Abstand': 'Avg. gap', 'letzter': 'last', 'Tage her': 'days ago', 'Prognose 30 T': 'Forecast 30 d',
+  'zu wenig Daten': 'not enough data', 'wird mit jedem Pull genauer': 'improves with every sync',
+  // .3mf-Anhang
+  '3mf-Datei': '3MF file', 'keine Datei': 'no file', 'entfernen': 'remove', '3mf angehängt': '3MF attached',
+  'Datei entfernt': 'File removed', 'Nur .3mf-Dateien.': 'Only .3mf files.', '— zum Download im Statuslink': '— for download in the status link',
+  // Eigenprojekte + Prioritäten/Deadlines
+  'Eigenprojekt': 'Own project', 'Eigenprojekte': 'Own Projects', '+ Eigenprojekt': '+ Own project', 'Neues Eigenprojekt …': 'New own project …',
+  'Eigene Produkte planen: modellieren, drucken, fotografieren, MakerWorld-Eintrag erstellen und veröffentlichen. Ohne Kunde.': 'Plan your own products: model, print, photograph, create the MakerWorld entry and publish. No customer.',
+  'Idee': 'Idea', 'Fotos': 'Photos', 'MW-Eintrag': 'MW entry', 'Veröffentlicht': 'Published',
+  'Priorität': 'Priority', 'Prio': 'Prio', 'Deadline': 'Deadline', 'Abschluss': 'Closed',
+  'Dringend': 'Urgent', 'Hoch': 'High', 'Normal': 'Normal', 'Niedrig': 'Low',
+  'Selbstkosten': 'Cost', 'Bilanz': 'Balance', 'MakerWorld − Selbstkosten': 'MakerWorld − cost', 'inkl. Arbeitszeit': 'incl. labor',
+  'noch nicht veröffentlicht': 'not yet published', 'Kosten ': 'Cost ', 'heute': 'today', 'überfällig': 'overdue'
+};
+
 // ---- Start ----
 setupSearch();
+applyNavLang();
 (async () => { await loadOverview(); const route = location.hash.slice(1) || 'heute'; go(routes[route] ? route : 'heute'); pollPull(); })();

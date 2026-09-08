@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { db, nowIso } from './db.js';
 
-const DEFAULT_EXPORT = path.resolve(process.cwd(), 'makerworld-export');
+const DEFAULT_EXPORT = path.resolve(process.cwd(), 'export');   // oder Pfad als Argument übergeben
 
 // --- minimaler, korrekter CSV-Parser (RFC-4180, Komma, "" Escapes) ---------
 function parseCsv(text) {

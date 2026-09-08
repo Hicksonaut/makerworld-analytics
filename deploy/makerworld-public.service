@@ -1,0 +1,17 @@
+[Unit]
+Description=MakerWorld public status page (only /p/:token, exposed via Tailscale Funnel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=youruser
+WorkingDirectory=/home/youruser/makerworld-analytics-app
+Environment=PUBLIC_PORT=4001
+Environment=PUBLIC_HOST=127.0.0.1
+ExecStart=/usr/bin/node server/public.js
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

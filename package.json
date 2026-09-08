@@ -6,6 +6,7 @@
   "main": "server/index.js",
   "scripts": {
     "start": "node server/index.js",
+    "start:public": "node server/public.js",
     "seed:demo": "node server/seed-demo.js",
     "import": "node server/importer.js",
     "login": "node server/scraper.js --login",

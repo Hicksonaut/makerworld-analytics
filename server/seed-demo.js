@@ -21,7 +21,7 @@ const daysAgo = n => { const d = new Date(today); d.setDate(d.getDate() - n); re
 if (force) {
   for (const t of ['models', 'snapshots', 'daily_metrics', 'traffic_sources', 'events',
     'instances', 'account_snapshots', 'images',
-    'contacts', 'projects', 'project_parts', 'project_items', 'parts', 'todos'])
+    'contacts', 'projects', 'project_parts', 'project_items', 'parts', 'todos', 'spools', 'milestones'])
     { try { db.exec(`DELETE FROM ${t}`); } catch {} }
 }
 
@@ -154,6 +154,26 @@ mkProject.run(cJordan, 'Pen holder (gift)', 'Modeled for free, then published.',
 // open request in the pipeline
 mkProject.run(cSam, 'Wall hooks for hallway', null, 'demo-1004',
   'druck', 'offen', 15, 0.6, 0.3, 'Standard', null, 0, 4, 0, null, capturedAt);
+
+// priorities + deadlines on the customer projects (0 low … 3 urgent)
+db.prepare('UPDATE projects SET priority=?, due_date=? WHERE id=?').run(3, iso(daysAgo(-4)), prCoaster); // urgent, due in 4d
+db.prepare("UPDATE projects SET priority=1 WHERE title='Pen holder (gift)'");
+db.prepare("UPDATE projects SET priority=2, due_date=? WHERE title='Wall hooks for hallway'").run(iso(daysAgo(-10)));
+
+// --- own projects (no customer): model → print → photos → MW entry → published
+const mkSelf = db.prepare(`INSERT INTO projects
+  (title,description,design_id,stage,status,self,priority,kind,filament_g,print_hours,labor_hours,due_date,published,created_at)
+  VALUES (?,?,?,?,?,1,?,?,?,?,?,?,?,?)`);
+mkSelf.run('Modular Desk Organizer', 'Own product idea, several trays.', null, 'modellierung', 'offen', 3, 'modell_print', null, null, 3, iso(daysAgo(-7)), 0, capturedAt);
+mkSelf.run('Parametric Cable Clips', 'Print set, then photograph.', null, 'druck', 'offen', 1, 'modell_print', 30, 1.0, 0.5, null, 0, capturedAt);
+mkSelf.run('Fan Grill Cover 120mm', 'Backlog idea.', null, 'idee', 'offen', 2, 'modell_print', null, null, null, iso(daysAgo(-25)), 0, capturedAt);
+mkSelf.run('Phone Stand v2', 'Reworked, already published.', 'demo-1002', 'publish', 'offen', 1, 'modell_print', 48, 1.8, 2, null, 1, capturedAt);
+
+// --- filament stock (spools) ----------------------------------------------
+const mkSpool = db.prepare('INSERT INTO spools (material,color,hex,brand,total_g,remaining_g,cost,created_at) VALUES (?,?,?,?,?,?,?,?)');
+mkSpool.run('PLA', 'Schwarz', '#1b1b1b', 'Bambu', 1000, 640, 19.99, capturedAt);
+mkSpool.run('PLA', 'Weiß', '#f2f2f2', 'Bambu', 1000, 120, 19.99, capturedAt);   // low
+mkSpool.run('PETG', 'Rot', '#b02a2a', 'Sunlu', 1000, 810, 15.99, capturedAt);
 
 // --- global settings / a demo todo ----------------------------------------
 setSetting('handle', '@you');

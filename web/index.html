@@ -10,9 +10,9 @@
 <body>
   <aside class="sidebar">
     <div class="brand"><span class="logo">MW</span><div><b>ANALYTICS</b><small id="handle">@you</small></div></div>
-    <div class="searchbox"><input id="globalSearch" placeholder="🔍 Suche (Modelle, Kunden, Projekte)" autocomplete="off"><div id="searchResults" class="search-results" hidden></div></div>
+    <div class="searchbox"><input id="globalSearch" placeholder="Suche (Modelle, Kunden, Projekte)" autocomplete="off"><div id="searchResults" class="search-results" hidden></div></div>
     <nav>
-      <a data-route="heute" class="active">🏠 Heute</a>
+      <a data-route="heute" class="active">Heute</a>
       <div class="nav-sep">Analyse</div>
       <a data-route="overview">Übersicht</a>
       <a data-route="momentum">Momentum</a>
@@ -28,6 +28,9 @@
       <a data-route="teile">Teile &amp; Kalkulation</a>
       <div class="nav-sep">Produktion</div>
       <a data-route="pipeline">Produkte</a>
+      <a data-route="selbst">Eigenprojekte</a>
+      <a data-route="druckplan">Druckplan</a>
+      <a data-route="material">Filament-Lager</a>
       <a data-route="todos">Todos<span class="cnt" id="todoCnt">0</span></a>
       <div class="nav-sep">System</div>
       <a data-route="data">Daten &amp; Pull</a>
@@ -36,6 +39,7 @@
       <button id="pullBtn" class="btn primary">Live-Pull starten</button>
       <div id="pullStatus" class="pull-status"></div>
     </div>
+    <div class="langsw" id="langSw"><a data-lang="de">DE</a><span>·</span><a data-lang="en">EN</a></div>
     <div class="sidefoot" id="lastPull"></div>
   </aside>
 

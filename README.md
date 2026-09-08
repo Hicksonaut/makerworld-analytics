@@ -11,8 +11,9 @@ small CRM for the models you print or design for other people.
 No cloud, no accounts, no tracking — it runs on your machine (or a Raspberry Pi)
 and the data never leaves it.
 
-> **Interface language is German.** The code and this README are English; the UI
-> labels are in German. Everything is easy to translate in `web/app.js` if you want.
+> **Bilingual UI (German / English).** The interface ships in German with a
+> one-click **DE / EN** switch in the sidebar (and under *Daten & Pull*). Code and
+> this README are English.
 
 ![Overview dashboard](docs/01-overview.png)
 
@@ -52,10 +53,39 @@ and the data never leaves it.
   friend can later earn credits on MakerWorld, the Finances page links projects
   to their uploaded model and shows the resulting downloads/points/€ next to the
   project's material cost.
+- **Priorities & deadlines** on every project (low → urgent, with overdue
+  badges) and a **stage "path" bar** (à la Salesforce) with one-click *complete
+  stage* and an auto-filled close date.
+- **Kanban boards with drag & drop** (leads, projects, own projects, products) —
+  drag a card to another column, or use the dropdown.
+- **Model-only jobs** (you model, the friend prints): the calculator hides the
+  print side, and the customer status page skips the print step.
 - Invoice / receipt as a clean printable page → **Save as PDF** and send it
   yourself via WhatsApp / e-mail / AirDrop (nothing is sent automatically).
 - P&L (income vs. expenses vs. point payouts), expense and payout tracking,
   global search, a "Today" action dashboard, and an optional daily digest push.
+
+**Production & planning**
+- **Own projects** (no customer): plan your own products through *idea → model →
+  print → photos → MakerWorld entry → published*, with priority and deadline.
+- **Print queue** — every open print position across all projects in one place:
+  what to print next, total filament & time, mark prints done.
+- **Filament stock** — spools with remaining grams; a print deducts automatically;
+  low-stock warnings.
+- **Shareable status link** — a read-only order-status page for a customer
+  (progress, positions, price, paid badge). Served by a separate, isolated
+  process so only that page is exposed; the dashboard stays local. For
+  model-only jobs you can attach the **`.3mf` file**, downloadable once the order
+  is marked paid.
+
+**Reverse-engineering the points system**
+- A **Points Matrix** estimates points per download / per print from your daily
+  history, shows where points come from (model / profile / ratings), the timing
+  between point events per model, and a 30-day forecast — it gets more accurate
+  with every pull.
+- Aggregated **change-impact** across all models (does changing the cover / title
+  / tags actually raise CTR?), a weekly insights report and milestone push
+  notifications (1000 downloads, next voucher, models going cold).
 
 **Data**
 - One live pull button, plus an optional scheduled daily pull (cron).
@@ -64,6 +94,10 @@ and the data never leaves it.
 | Model detail | Finances | Project calculator |
 |---|---|---|
 | ![](docs/02-model-detail.png) | ![](docs/03-finances.png) | ![](docs/04-project.png) |
+
+| Own projects (planning) | Categories |
+|---|---|
+| ![](docs/06-own-projects.png) | ![](docs/05-categories.png) |
 
 ---
 
@@ -132,10 +166,16 @@ Vanilla-JS single-page frontend with Chart.js — **no build step**. Data lives 
 one SQLite file under `data/` (git-ignored).
 
 ```
-server/   db.js  index.js  scraper.js  ingest.js  crm.js  importer.js  seed-demo.js
+server/   db.js  index.js  public.js  publicPage.js  scraper.js  ingest.js
+          crm.js  importer.js  seed-demo.js
 web/      index.html  app.js  styles.css  vendor/chart.umd.min.js
-deploy/   makerworld-analytics.service
+deploy/   makerworld-analytics.service  makerworld-public.service
 ```
+
+The optional **public status page** runs as a second, minimal process
+(`server/public.js`, [`deploy/makerworld-public.service`](deploy/makerworld-public.service))
+that only serves `/p/:token` — expose *just that* to the internet (e.g. a
+Tailscale Funnel to `127.0.0.1:4001`) while the dashboard stays on your LAN.
 
 ---
 

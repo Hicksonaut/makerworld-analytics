@@ -7,6 +7,8 @@ import { db, DATA_DIR, getSetting, setSetting, nowIso } from './db.js';
 import { importExport } from './importer.js';
 import { writeModel, startRun, finishRun } from './ingest.js';
 import { crm } from './crm.js';
+import { renderStatus, projectFileByToken } from './publicPage.js';
+import fs from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -28,6 +30,7 @@ async function startPull(mode) {
       const { runPull } = await import('./scraper.js');   // lazy: Server startet auch ohne Playwright
       const res = await runPull({ mode, onLog: pushLog });
       pullState.lastResult = { ok: true, ...res, at: nowIso() };
+      try { await checkMilestones(); } catch (e) { pushLog('Meilenstein-Check: ' + e.message); }
       try { await sendDigest('pull'); } catch {}   // Digest/Push nach erfolgreichem Pull
     } catch (e) {
       pushLog('Fehler: ' + e.message);
@@ -570,18 +573,39 @@ app.get('/api/settings', (req, res) => res.json({
   schedule_enabled: getSetting('schedule_enabled', '0') === '1',
   start_date: getSetting('start_date', '2023-01-01'),
   eur_per_point: eurRate(),
-  notify_url: getSetting('notify_url', '')
+  notify_url: getSetting('notify_url', ''),
+  weekly_enabled: getSetting('weekly_enabled', '0') === '1',
+  weekly_day: +getSetting('weekly_day', '1'),      // 0=So … 1=Mo
+  weekly_time: getSetting('weekly_time', '08:00'),
+  spool_low_g: +getSetting('spool_low_g', '150'),
+  public_base_url: getSetting('public_base_url', '')
 }));
 app.post('/api/settings', (req, res) => {
-  const { schedule_time, schedule_enabled, start_date, eur_per_point, notify_url } = req.body || {};
+  const b = req.body || {};
+  const { schedule_time, schedule_enabled, start_date, eur_per_point, notify_url } = b;
   if (schedule_time != null) setSetting('schedule_time', schedule_time);
   if (schedule_enabled != null) setSetting('schedule_enabled', schedule_enabled ? '1' : '0');
   if (start_date != null) setSetting('start_date', start_date);
   if (eur_per_point != null && Number.isFinite(+eur_per_point) && +eur_per_point > 0) setSetting('eur_per_point', String(+eur_per_point));
   if (notify_url != null) setSetting('notify_url', String(notify_url).trim());
-  rescheduleCron();
+  if (b.weekly_enabled != null) setSetting('weekly_enabled', b.weekly_enabled ? '1' : '0');
+  if (b.weekly_day != null) setSetting('weekly_day', String(Math.max(0, Math.min(6, +b.weekly_day))));
+  if (b.weekly_time != null) setSetting('weekly_time', String(b.weekly_time));
+  if (b.spool_low_g != null) setSetting('spool_low_g', String(Math.max(0, +b.spool_low_g)));
+  if (b.public_base_url != null) setSetting('public_base_url', String(b.public_base_url).trim().replace(/\/+$/, ''));
+  rescheduleCron(); rescheduleWeekly();
   res.json({ ok: true });
 });
+// Wochen-Insight-Report als Text (für Push + Vorschau)
+function weeklyText() {
+  const ins = buildInsights();
+  const L = [`MakerWorld Wochen-Report — ${new Date().toLocaleDateString('de-DE')}`];
+  ins.forEach(i => L.push(`- ${i.title}: ${i.text}`));
+  if (ins.length === 0) L.push('Noch zu wenig Daten für Insights.');
+  return L.join('\n');
+}
+app.get('/api/insights/weekly-text', (req, res) => res.json({ text: weeklyText() }));
+app.post('/api/insights/send', async (req, res) => { const text = weeklyText(); const sent = await pushNotify('MakerWorld Wochen-Report', text); res.json({ ok: true, sent, text }); });
 
 // ---- Cron: taeglicher Pull ------------------------------------------------
 let cronTask = null;
@@ -595,6 +619,20 @@ function rescheduleCron() {
     startPull('scheduled');
   });
   console.log('[cron] geplant:', expr);
+}
+// ---- Cron: woechentlicher Insight-Report ----------------------------------
+let weeklyTask = null;
+function rescheduleWeekly() {
+  if (weeklyTask) { weeklyTask.stop(); weeklyTask = null; }
+  if (getSetting('weekly_enabled', '0') !== '1') return;
+  const [h, m] = getSetting('weekly_time', '08:00').split(':').map(Number);
+  const day = +getSetting('weekly_day', '1');
+  const expr = `${m || 0} ${h || 8} * * ${day}`;
+  weeklyTask = cron.schedule(expr, async () => {
+    console.log('[cron] Wochen-Report', new Date().toISOString());
+    try { await pushNotify('MakerWorld Wochen-Report', weeklyText()); } catch (e) { console.log(e.message); }
+  });
+  console.log('[cron] Wochen-Report geplant:', expr);
 }
 
 // ---- statische Dateien ----------------------------------------------------
@@ -622,12 +660,12 @@ app.get('/api/today', (req, res) => res.json(todayData()));
 function digestText() {
   const d = todayData();
   const L = [`MakerWorld Analytics — ${d.date}`];
-  if (d.openPayments.length) L.push(`\n💶 Offene Zahlungen (${d.openPayments.length}): ` + d.openPayments.map(p => `${p.contact_name}: ${p.title}`).join(', '));
+  if (d.openPayments.length) L.push(`\nOffene Zahlungen (${d.openPayments.length}): ` + d.openPayments.map(p => `${p.contact_name}: ${p.title}`).join(', '));
   const overdue = d.dueTodos.filter(x => x.overdue);
-  if (overdue.length) L.push(`\n⏰ Überfällige Aufgaben (${overdue.length}): ` + overdue.slice(0, 6).map(t => t.title).join(', '));
-  if (d.alerts.length) L.push(`\n📊 Alerts (${d.alerts.length}): ` + d.alerts.slice(0, 5).map(a => `${a.title}: ${a.text}`).join(' · '));
-  if (d.recentChanges.length) L.push(`\n🔄 Änderungen (3T): ` + d.recentChanges.slice(0, 6).map(c => `${c.model_title || ''} ${c.type}`).join(', '));
-  if (L.length === 1) L.push('\nAlles ruhig — nichts zu tun. 👍');
+  if (overdue.length) L.push(`\nÜberfällige Aufgaben (${overdue.length}): ` + overdue.slice(0, 6).map(t => t.title).join(', '));
+  if (d.alerts.length) L.push(`\nAlerts (${d.alerts.length}): ` + d.alerts.slice(0, 5).map(a => `${a.title}: ${a.text}`).join(' · '));
+  if (d.recentChanges.length) L.push(`\nÄnderungen (3T): ` + d.recentChanges.slice(0, 6).map(c => `${c.model_title || ''} ${c.type}`).join(', '));
+  if (L.length === 1) L.push('\nAlles ruhig — nichts zu tun.');
   return L.join('\n');
 }
 async function sendDigest() {
@@ -640,6 +678,113 @@ async function sendDigest() {
 app.get('/api/digest', (req, res) => { let last = null; try { last = JSON.parse(getSetting('last_digest', 'null')); } catch {} res.json({ current: digestText(), last }); });
 app.post('/api/digest/send', async (req, res) => res.json({ ok: true, text: await sendDigest() }));
 
+// ---- Push-Helfer (ntfy.sh / Webhook) --------------------------------------
+async function pushNotify(title, body) {
+  const url = getSetting('notify_url', ''); if (!url) return false;
+  try { await fetch(url, { method: 'POST', headers: { Title: title, 'Content-Type': 'text/plain; charset=utf-8' }, body }); return true; }
+  catch (e) { console.log('[notify]', e.message); return false; }
+}
+
+// ---- Meilenstein-Benachrichtigungen ---------------------------------------
+const DL_THRESHOLDS = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000];
+const deNum = n => Number(n).toLocaleString('de-DE');
+function recordMilestone(design_id, kind, threshold, title) {
+  try { return db.prepare('INSERT OR IGNORE INTO milestones(design_id,kind,threshold,title,date,created_at) VALUES(?,?,?,?,?,?)')
+    .run(design_id, kind, threshold, title, new Date().toISOString().slice(0, 10), nowIso()).changes > 0; }
+  catch { return false; }
+}
+async function checkMilestones() {
+  const init = getSetting('milestones_init', '0') !== '1';   // erster Lauf: still verbuchen, nicht pushen
+  const msgs = [];
+  const models = db.prepare(`SELECT m.design_id, m.title, s.download, s.point FROM models m
+    JOIN (${latestSnapSub}) s ON s.design_id=m.design_id WHERE COALESCE(m.planned,0)=0`).all();
+  for (const m of models) for (const t of DL_THRESHOLDS)
+    if ((m.download || 0) >= t && recordMilestone(m.design_id, 'download', t, `${m.title}: ${t} Downloads`))
+      msgs.push(`${m.title}: ${deNum(t)} Downloads erreicht`);
+  // "kalt": live, >30 Tage alt, 0 Downloads in 7 Tagen, vorher aktiv
+  const cold = db.prepare(`SELECT m.design_id, m.title,
+      (SELECT COALESCE(SUM(download),0) FROM daily_metrics d WHERE d.design_id=m.design_id AND d.date>=date('now','-7 day')) d7,
+      (SELECT COALESCE(SUM(download),0) FROM daily_metrics d WHERE d.design_id=m.design_id AND d.date<date('now','-7 day') AND d.date>=date('now','-37 day')) d30
+    FROM models m WHERE COALESCE(m.planned,0)=0 AND m.publish_date<=date('now','-30 day')`).all();
+  for (const c of cold) if (c.d7 === 0 && c.d30 >= 10 && recordMilestone(c.design_id, 'cold', 0, `${c.title} kalt`))
+    msgs.push(`${c.title}: 0 Downloads in 7 Tagen (vorher ${c.d30} in 30T)`);
+  // Gutschein-Schwellen (524 Punkte = 40 €)
+  const acc = db.prepare('SELECT point FROM account_snapshots ORDER BY id DESC LIMIT 1').get();
+  if (acc) { const reached = Math.floor((acc.point || 0) / 524);
+    for (let k = 1; k <= reached; k++) if (recordMilestone(null, 'voucher', k * 524, `${k * 524} Punkte`))
+      msgs.push(`${deNum(k * 524)} Punkte erreicht — ${k}× 40 € Gutschein möglich`); }
+  if (init) { setSetting('milestones_init', '1'); return []; }
+  if (msgs.length) await pushNotify('MakerWorld Meilenstein', msgs.join('\n'));
+  return msgs;
+}
+app.get('/api/milestones', (req, res) => res.json(db.prepare('SELECT * FROM milestones ORDER BY id DESC LIMIT 40').all()));
+app.post('/api/milestones/check', async (req, res) => res.json({ new: await checkMilestones() }));
+
+// ---- Insights (automatische Erkenntnisse) ---------------------------------
+function buildInsights() {
+  const rate = eurRate();
+  const models = attachMomentum(modelsWithKpis()).filter(m => !m.planned);
+  const ins = [];
+  const byDl30 = [...models].sort((a, b) => (b.dl30 || 0) - (a.dl30 || 0));
+  if (byDl30[0] && byDl30[0].dl30 > 0) ins.push({ kind: 'mover', title: 'Zugpferd (30 T)',
+    text: `${byDl30[0].title}: ${deNum(byDl30[0].dl30)} Downloads in 30 Tagen` + (byDl30[0].v_trend != null ? `, Views-Trend ${byDl30[0].v_trend > 0 ? '+' : ''}${byDl30[0].v_trend}%` : ''),
+    design_id: byDl30[0].design_id });
+  const fallers = models.filter(m => m.v_trend != null && m.v_trend < -15).sort((a, b) => a.v_trend - b.v_trend);
+  if (fallers[0]) ins.push({ kind: 'faller', title: 'Verliert an Fahrt',
+    text: `${fallers[0].title}: Views ${fallers[0].v_trend}% vs. Vorperiode`, design_id: fallers[0].design_id });
+  // hohe Impressions, aber niedrige CTR = Titelbild/Titel-Chance
+  const ctrOf = m => m.impression ? (m.view / m.impression) * 100 : null;
+  const opp = models.filter(m => (m.impression || 0) > 2000 && ctrOf(m) != null).sort((a, b) => ctrOf(a) - ctrOf(b))[0];
+  if (opp && ctrOf(opp) < 6) ins.push({ kind: 'ctr', title: 'CTR-Chance',
+    text: `${opp.title}: ${deNum(opp.impression)} Impressionen, aber nur ${ctrOf(opp).toFixed(1)}% CTR — Titelbild/Titel testen`, design_id: opp.design_id });
+  const earner = [...models].sort((a, b) => (b.earned || 0) - (a.earned || 0))[0];
+  if (earner && earner.earned > 0) ins.push({ kind: 'earner', title: 'Top-Verdiener',
+    text: `${earner.title}: ${earner.earned.toFixed(2)} € (Lifetime)`, design_id: earner.design_id });
+  // Gutschein-ETA
+  const acc = db.prepare('SELECT point FROM account_snapshots ORDER BY id DESC LIMIT 1').get();
+  const pts30 = models.reduce((s, m) => s + (m.pts30 || 0), 0);
+  if (acc) { const toNext = 524 - ((acc.point || 0) % 524); const perDay = pts30 / 30;
+    const eta = perDay > 0 ? Math.ceil(toNext / perDay) : null;
+    ins.push({ kind: 'voucher', title: 'Nächster Gutschein',
+      text: `Noch ${deNum(Math.round(toNext))} Punkte bis 40 €` + (eta ? ` — bei ${perDay.toFixed(1)} P/Tag in ~${eta} Tagen` : '') });
+  }
+  // Tag-Tipp
+  const tagMap = {};
+  for (const m of models) { const tags = m.tags ? JSON.parse(m.tags) : [];
+    for (const tg of tags) { const e = tagMap[tg] || (tagMap[tg] = { tag: tg, n: 0, v: 0 }); e.n++; e.v += m.view || 0; } }
+  const tags = Object.values(tagMap).filter(t => t.n >= 2).map(t => ({ ...t, avg: t.v / t.n })).sort((a, b) => b.avg - a.avg);
+  if (tags.length >= 2) ins.push({ kind: 'tag', title: 'Stärkster Tag',
+    text: `„${tags[0].tag}" bringt im Schnitt ${deNum(Math.round(tags[0].avg))} Views/Modell (${tags[0].n}×)` });
+  return ins;
+}
+app.get('/api/insights', (req, res) => res.json({ insights: buildInsights(), date: new Date().toISOString().slice(0, 10) }));
+
+// ---- Änderungswirkung aggregiert (über alle Modelle) ----------------------
+app.get('/api/analytics/change-impact', (req, res) => {
+  const win = Math.max(3, Math.min(90, +req.query.win || 21));
+  const evs = db.prepare("SELECT * FROM events WHERE type IN ('thumbnail','title','tags','description')").all();
+  const ctr = o => (o && o.imp) ? (o.v / o.imp) * 100 : null;
+  const agg = {};
+  let measured = 0;
+  for (const ev of evs) {
+    const before = db.prepare(`SELECT SUM(impression) imp, SUM(view) v, SUM(download) dl FROM daily_metrics
+      WHERE design_id=? AND date<? AND date>=date(?, '-'||?||' day')`).get(ev.design_id, ev.date, ev.date, win);
+    const after = db.prepare(`SELECT SUM(impression) imp, SUM(view) v, SUM(download) dl FROM daily_metrics
+      WHERE design_id=? AND date>=? AND date<date(?, '+'||?||' day')`).get(ev.design_id, ev.date, ev.date, win);
+    const cb = ctr(before), ca = ctr(after);
+    const e = agg[ev.type] || (agg[ev.type] = { type: ev.type, n: 0, ctrDelta: 0, ctrN: 0, up: 0, dlBefore: 0, dlAfter: 0 });
+    e.n++;
+    if (cb != null && ca != null) { e.ctrDelta += (ca - cb); e.ctrN++; if (ca > cb) e.up++; measured++; }
+    e.dlBefore += before.dl || 0; e.dlAfter += after.dl || 0;
+  }
+  const TL = { thumbnail: 'Titelbild', title: 'Titel', tags: 'Tags', description: 'Beschreibung' };
+  const rows = Object.values(agg).map(e => ({ type: e.type, label: TL[e.type] || e.type, count: e.n,
+    avgCtrDelta: e.ctrN ? +(e.ctrDelta / e.ctrN).toFixed(2) : null, winRate: e.ctrN ? Math.round((e.up / e.ctrN) * 100) : null,
+    dlBefore: e.dlBefore, dlAfter: e.dlAfter, dlChangePct: e.dlBefore ? Math.round(((e.dlAfter - e.dlBefore) / e.dlBefore) * 100) : null }))
+    .sort((a, b) => (b.avgCtrDelta ?? -99) - (a.avgCtrDelta ?? -99));
+  res.json({ win, rows, totalEvents: evs.length, measured });
+});
+
 // ---- Globale Suche --------------------------------------------------------
 app.get('/api/search', (req, res) => {
   const q = '%' + String(req.query.q || '').trim() + '%';
@@ -649,6 +794,49 @@ app.get('/api/search', (req, res) => {
     contacts: db.prepare('SELECT id, name, source FROM contacts WHERE name LIKE ? OR mw_handle LIKE ? OR email LIKE ? LIMIT 8').all(q, q, q),
     projects: db.prepare(`SELECT p.id, p.title, c.name contact_name FROM projects p JOIN contacts c ON c.id=p.contact_id
       WHERE p.title LIKE ? LIMIT 8`).all(q)
+  });
+});
+
+// ---- Punkte-Matrix (Reverse-Engineering des Punktesystems) ----------------
+// Nutzt die Tages-Deltas (daily_metrics): MakerWorld liefert selbst die Herkunft
+// der Punkte (Modell/Profil/Bewertungen/Sonstige). Daraus schaetzen wir per
+// Regression durch den Ursprung die Rate "Punkte je Download" / "je Druck" und
+// prognostizieren kuenftige Punkte. Wird mit mehr Tagesdaten automatisch genauer.
+app.get('/api/analytics/points-matrix', (req, res) => {
+  const rows = db.prepare(`SELECT design_id, date, download dl, print pr, boost bo,
+      point_from_model pfm, point_from_inst pfi, point_from_ratings pfr, point_from_others pfo,
+      (point_from_model+point_from_inst+point_from_ratings+point_from_others) pts
+    FROM daily_metrics ORDER BY design_id, date`).all();
+  const slopeOrigin = (xs, ys) => { let sxy = 0, sxx = 0; for (let i = 0; i < xs.length; i++) { sxy += xs[i] * ys[i]; sxx += xs[i] * xs[i]; } return sxx ? sxy / sxx : 0; };
+  const corr = (xs, ys) => { const n = xs.length; if (n < 3) return null;
+    const mx = xs.reduce((a, b) => a + b, 0) / n, my = ys.reduce((a, b) => a + b, 0) / n;
+    let sxy = 0, sxx = 0, syy = 0; for (let i = 0; i < n; i++) { const dx = xs[i] - mx, dy = ys[i] - my; sxy += dx * dy; sxx += dx * dx; syy += dy * dy; }
+    return (sxx && syy) ? +(sxy / Math.sqrt(sxx * syy)).toFixed(3) : null; };
+  const dls = rows.map(r => r.dl), prs = rows.map(r => r.pr), pfm = rows.map(r => r.pfm), pfi = rows.map(r => r.pfi);
+  const perDownload = +slopeOrigin(dls, pfm).toFixed(4);
+  const perPrint = +slopeOrigin(prs, pfi).toFixed(4);
+  const T = rows.reduce((a, r) => { a.pfm += r.pfm; a.pfi += r.pfi; a.pfr += r.pfr; a.pfo += r.pfo; a.pts += r.pts; a.dl += r.dl; a.pr += r.pr; return a; },
+    { pfm: 0, pfi: 0, pfr: 0, pfo: 0, pts: 0, dl: 0, pr: 0 });
+  // Punkte-Tage je Modell -> Abstände + Prognose (aus 30-Tage-Aktivität)
+  const pointDays = {}; for (const r of rows) if (r.pts > 0) (pointDays[r.design_id] = pointDays[r.design_id] || []).push(r.date);
+  const recent = {}; for (const r of db.prepare(`SELECT design_id, SUM(download) dl, SUM(print) pr FROM daily_metrics WHERE date>=date('now','-30 day') GROUP BY design_id`).all()) recent[r.design_id] = r;
+  const titles = Object.fromEntries(db.prepare('SELECT design_id,title FROM models').all().map(m => [m.design_id, m.title]));
+  const today = Date.now();
+  const byModel = Object.entries(pointDays).map(([id, ds]) => {
+    ds.sort(); const gaps = []; for (let i = 1; i < ds.length; i++) gaps.push((Date.parse(ds[i]) - Date.parse(ds[i - 1])) / 86400000);
+    const avgGap = gaps.length ? +(gaps.reduce((a, b) => a + b, 0) / gaps.length).toFixed(1) : null;
+    const last = ds[ds.length - 1]; const daysSince = Math.round((today - Date.parse(last)) / 86400000);
+    const rc = recent[id] || { dl: 0, pr: 0 };
+    const pred30 = +((rc.dl * perDownload) + (rc.pr * perPrint)).toFixed(1);   // ~naechste 30 Tage bei gleicher Aktivitaet
+    return { design_id: id, title: titles[id] || id, events: ds.length, avgGap, lastDate: last, daysSince, pred30 };
+  }).sort((a, b) => b.pred30 - a.pred30 || a.daysSince - b.daysSince);
+  const rate = eurRate();
+  const predTotal = +byModel.reduce((a, m) => a + (m.pred30 || 0), 0).toFixed(1);
+  res.json({
+    perDownload, perPrint, eurPerPoint: rate,
+    shares: { model: T.pfm, inst: T.pfi, ratings: T.pfr, others: T.pfo, total: T.pts },
+    fit: { downloadCorr: corr(dls, pfm), printCorr: corr(prs, pfi), samples: rows.length },
+    byModel, predTotal, predTotalEur: +(predTotal * rate).toFixed(2)
   });
 });
 
@@ -664,10 +852,21 @@ app.get('/api/analytics/tag-perf', (req, res) => {
   res.json({ tags: list, modelCount: rows.length });
 });
 
+// ---- Öffentlicher Read-only-Statuslink für ein Projekt --------------------
+// (Nach außen erreichbar über den isolierten Server public.js; hier lokal fürs Testen.)
+app.get('/p/:token', (req, res) => { const r = renderStatus(req.params.token); res.status(r.code).type('html').send(r.html); });
+app.get('/p/:token/file', (req, res) => {
+  const f = projectFileByToken(req.params.token); if (!f) return res.status(404).send('Keine Datei.');
+  const abs = path.join(DATA_DIR, f.rel); if (!fs.existsSync(abs)) return res.status(404).send('Keine Datei.');
+  res.setHeader('Content-Disposition', 'attachment; filename="' + f.name.replace(/["\r\n]/g, '') + '"');
+  res.setHeader('Content-Type', 'model/3mf'); fs.createReadStream(abs).pipe(res);
+});
+
 app.use('/data/images', express.static(path.join(DATA_DIR, 'images')));
 // Kein Caching fuer die App-Dateien, damit Updates sofort ankommen (Safari cached sonst app.js/css).
 app.use('/', express.static(path.join(ROOT, 'web'), { setHeaders: res => res.setHeader('Cache-Control', 'no-cache') }));
 
 const PORT = process.env.PORT || 4000;
 rescheduleCron();
+rescheduleWeekly();
 app.listen(PORT, () => console.log(`MakerWorld-Analytics laeuft:  http://localhost:${PORT}`));

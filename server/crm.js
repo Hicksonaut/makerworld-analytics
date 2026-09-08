@@ -1,6 +1,9 @@
 // CRM: Kontakte, Projekte, Bestellungen + Umsatz-Auswertung. Eigener Router.
 import express from 'express';
-import { db, nowIso, getSetting, setSetting } from './db.js';
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import { db, DATA_DIR, nowIso, getSetting, setSetting } from './db.js';
 
 export const crm = express.Router();
 
@@ -33,13 +36,16 @@ export function computeProject(p, parts, s, items = []) {
   const free = p.margin_tier === 'kostenlos';
   const tier = s.tiers.find(t => t.name === p.margin_tier);
   const margin = tier ? tier.margin : (s.tiers[0]?.margin ?? 0.6);
-  const suggestion = free ? 0 : roundUp(cost * (1 + margin), s.round_to);
+  // Exklusiv-Aufpreis (Kunde zahlt dafuer, dass das Modell NICHT hochgeladen wird)
+  const exclusiveFee = p.no_upload ? +(+p.no_upload_fee || 0).toFixed(2) : 0;
+  const base = free ? 0 : roundUp(cost * (1 + margin), s.round_to);
+  const suggestion = +(base + exclusiveFee).toFixed(2);
   const price = p.price != null ? p.price : suggestion;         // Einnahme
   const profit = +(price - cost).toFixed(2);                    // Gewinn (nach Arbeit)
   const contribution = +(price - material).toFixed(2);          // Deckungsbeitrag (ggü. Sachkosten)
   const loss = price <= 0 ? +(-material).toFixed(2) : 0;        // Verlust bei kostenlos = Materialkosten
   return { filament: +filament.toFixed(2), partsSum: +partsSum.toFixed(2), energy: +energy.toFixed(2),
-    material, labor, cost, margin, free, suggestion, price, profit, contribution, loss,
+    material, labor, cost, margin, free, suggestion, price, profit, contribution, loss, exclusiveFee,
     filamentG: +filamentG.toFixed(1), printH: +printH.toFixed(2), hasItems };
 }
 // MakerWorld-Ertrag des verknuepften Modells (Lifetime Punkte -> EUR + Downloads).
@@ -55,6 +61,7 @@ function modelEarned(design_id) {
 // Auto-Aufgabe: fertig + noch nicht bezahlt -> "Zahlung einfordern".
 // bezahlt gesetzt -> offene Zahlungs-Aufgaben erledigen.
 function syncPaymentTodo(p) {
+  if (p.self) return;   // Eigenprojekte: kein Kunde, keine Zahlungs-Aufgabe
   const open = db.prepare("SELECT id FROM todos WHERE project_id=? AND done=0 AND title LIKE 'Zahlung einfordern%'").all(p.id);
   const free = p.margin_tier === 'kostenlos' || (p.price != null && p.price <= 0);
   if (p.paid || free) {
@@ -63,6 +70,22 @@ function syncPaymentTodo(p) {
   } else if (p.stage === 'fertig' && !open.length) {
     db.prepare('INSERT INTO todos(contact_id,project_id,title,priority,created_at) VALUES(?,?,?,?,?)')
       .run(p.contact_id, p.id, 'Zahlung einfordern: ' + (p.title || 'Projekt'), 2, nowIso());
+  }
+}
+// Auto-Aufgabe: reine Modellarbeit fertig -> "MakerWorld-Upload: <Titel>".
+// Faellt weg, wenn Kunde Exklusivitaet bezahlt (no_upload) oder das Modell
+// bereits verknuepft/veroeffentlicht ist -> offene Upload-Aufgabe wird erledigt.
+function syncUploadTodo(p) {
+  if (p.self) return;   // Eigenprojekte haben ihren eigenen Veröffentlichungs-Schritt (Stufe)
+  const open = db.prepare("SELECT id FROM todos WHERE project_id=? AND done=0 AND title LIKE 'MakerWorld-Upload:%'").all(p.id);
+  const exclusive = !!p.no_upload;
+  const alreadyLinked = !!p.published || !!p.design_id;
+  const wantsTask = p.kind === 'modell' && p.stage === 'fertig' && !exclusive && !alreadyLinked;
+  if (wantsTask) {
+    if (!open.length) db.prepare('INSERT INTO todos(contact_id,project_id,title,priority,created_at) VALUES(?,?,?,?,?)')
+      .run(p.contact_id, p.id, 'MakerWorld-Upload: ' + (p.title || 'Modell'), 2, nowIso());
+  } else {
+    for (const t of open) db.prepare('UPDATE todos SET done=1, done_at=? WHERE id=?').run(nowIso(), t.id);
   }
 }
 function projectWithCalc(p, s) {
@@ -133,15 +156,18 @@ crm.delete('/contacts/:id', (req, res) => {
 // ---- Projekte -------------------------------------------------------------
 crm.post('/projects', (req, res) => {
   const b = req.body || {};
-  if (!b.contact_id || !b.title) return res.status(400).json({ error: 'contact_id/title fehlt' });
+  const isSelf = !!b.self;
+  if (!b.title || (!b.contact_id && !isSelf)) return res.status(400).json({ error: 'contact_id/title fehlt' });
   const r = db.prepare(`INSERT INTO projects(contact_id,title,description,design_id,stage,status,due_date,
-      filament_g,print_hours,labor_hours,margin_tier,price,paid,qty,created_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(b.contact_id, b.title, b.description || null, b.design_id || null,
-    b.stage || 'anfrage', b.status || 'offen', b.due_date || null,
+      filament_g,print_hours,labor_hours,margin_tier,price,paid,qty,kind,no_upload,no_upload_fee,self,priority,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(isSelf ? null : b.contact_id, b.title, b.description || null, b.design_id || null,
+    b.stage || (isSelf ? 'idee' : 'anfrage'), b.status || 'offen', b.due_date || null,
     b.filament_g || null, b.print_hours || null, b.labor_hours || null, b.margin_tier || null, b.price ?? null,
-    b.paid ? 1 : 0, b.qty || 1, nowIso());
+    b.paid ? 1 : 0, b.qty || 1, b.kind === 'modell' ? 'modell' : 'modell_print',
+    b.no_upload ? 1 : 0, b.no_upload_fee != null ? +b.no_upload_fee : 5,
+    isSelf ? 1 : 0, b.priority != null ? +b.priority : 1, nowIso());
   const np = db.prepare('SELECT * FROM projects WHERE id=?').get(r.lastInsertRowid);
-  syncPaymentTodo(np);
+  syncPaymentTodo(np); syncUploadTodo(np);
   res.json(projectWithCalc(np, calcSettings()));
 });
 crm.put('/projects/:id', (req, res) => {
@@ -150,25 +176,36 @@ crm.put('/projects/:id', (req, res) => {
   const b = req.body || {};
   const g = (k, d) => b[k] !== undefined ? b[k] : d;
   db.prepare(`UPDATE projects SET title=?,description=?,design_id=?,stage=?,status=?,due_date=?,
-      filament_g=?,print_hours=?,labor_hours=?,margin_tier=?,price=?,paid=?,qty=?,published=? WHERE id=?`)
+      filament_g=?,print_hours=?,labor_hours=?,margin_tier=?,price=?,paid=?,qty=?,published=?,kind=?,no_upload=?,no_upload_fee=?,close_date=?,priority=? WHERE id=?`)
     .run(g('title', cur.title), g('description', cur.description), g('design_id', cur.design_id),
       g('stage', cur.stage), g('status', cur.status), g('due_date', cur.due_date),
       g('filament_g', cur.filament_g), g('print_hours', cur.print_hours), g('labor_hours', cur.labor_hours),
       g('margin_tier', cur.margin_tier), g('price', cur.price),
       b.paid !== undefined ? (b.paid ? 1 : 0) : cur.paid, g('qty', cur.qty),
-      b.published !== undefined ? (b.published ? 1 : 0) : cur.published, req.params.id);
-  const upd = db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id);
-  syncPaymentTodo(upd);
+      b.published !== undefined ? (b.published ? 1 : 0) : cur.published,
+      b.kind !== undefined ? (b.kind === 'modell' ? 'modell' : 'modell_print') : cur.kind,
+      b.no_upload !== undefined ? (b.no_upload ? 1 : 0) : cur.no_upload,
+      b.no_upload_fee !== undefined ? +b.no_upload_fee : cur.no_upload_fee,
+      b.close_date !== undefined ? (b.close_date || null) : cur.close_date,
+      b.priority != null ? +b.priority : cur.priority, req.params.id);
+  let upd = db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id);
+  // Abschlussdatum automatisch setzen, sobald "fertig"/"publish" und noch keins hinterlegt.
+  if ((upd.stage === 'fertig' || upd.stage === 'publish') && !upd.close_date) {
+    db.prepare('UPDATE projects SET close_date=? WHERE id=?').run(new Date().toISOString().slice(0, 10), req.params.id);
+    upd = db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id);
+  }
+  syncPaymentTodo(upd); syncUploadTodo(upd);
   res.json(projectWithCalc(upd, calcSettings()));
 });
 crm.delete('/projects/:id', (req, res) => {
   db.prepare('DELETE FROM project_parts WHERE project_id=?').run(req.params.id);
   db.prepare('DELETE FROM project_items WHERE project_id=?').run(req.params.id);
+  try { fs.rmSync(path.join(DATA_DIR, 'project_files', String(req.params.id)), { recursive: true, force: true }); } catch {}
   db.prepare('DELETE FROM projects WHERE id=?').run(req.params.id); res.json({ ok: true });
 });
 crm.get('/project/:id', (req, res) => {
   const p = db.prepare(`SELECT p.*, m.title model_title, c.name contact_name FROM projects p
-    LEFT JOIN models m ON m.design_id=p.design_id JOIN contacts c ON c.id=p.contact_id WHERE p.id=?`).get(req.params.id);
+    LEFT JOIN models m ON m.design_id=p.design_id LEFT JOIN contacts c ON c.id=p.contact_id WHERE p.id=?`).get(req.params.id);
   if (!p) return res.status(404).json({ error: 'unbekannt' });
   const out = projectWithCalc(p, calcSettings());
   out.todos = db.prepare('SELECT * FROM todos WHERE project_id=? ORDER BY done, priority DESC, id').all(req.params.id);
@@ -206,10 +243,11 @@ crm.put('/project-items/:iid', (req, res) => {
   const cur = db.prepare('SELECT * FROM project_items WHERE id=?').get(req.params.iid);
   if (!cur) return res.status(404).json({ error: 'unbekannt' });
   const b = req.body || {}; const g = (k, d) => b[k] !== undefined ? b[k] : d;
-  db.prepare(`UPDATE project_items SET design_id=?,instance_id=?,label=?,qty=?,weight_g=?,print_min=? WHERE id=?`)
+  db.prepare(`UPDATE project_items SET design_id=?,instance_id=?,label=?,qty=?,weight_g=?,print_min=?,printed_qty=? WHERE id=?`)
     .run(g('design_id', cur.design_id), g('instance_id', cur.instance_id), g('label', cur.label),
       g('qty', cur.qty), b.weight_g !== undefined ? (b.weight_g == null ? null : +b.weight_g) : cur.weight_g,
-      b.print_min !== undefined ? (b.print_min == null ? null : +b.print_min) : cur.print_min, req.params.iid);
+      b.print_min !== undefined ? (b.print_min == null ? null : +b.print_min) : cur.print_min,
+      g('printed_qty', cur.printed_qty), req.params.iid);
   res.json(withCalc(cur.project_id));
 });
 crm.delete('/project-items/:iid', (req, res) => {
@@ -223,7 +261,15 @@ crm.get('/crm/projects', (req, res) => {
   const s = calcSettings();
   const rows = db.prepare(`SELECT p.*, c.name contact_name, c.source contact_source, m.title model_title
     FROM projects p JOIN contacts c ON c.id=p.contact_id LEFT JOIN models m ON m.design_id=p.design_id
-    ORDER BY p.id DESC`).all().map(p => projectWithCalc(p, s));
+    WHERE COALESCE(p.self,0)=0 ORDER BY p.id DESC`).all().map(p => projectWithCalc(p, s));
+  res.json(rows);
+});
+// Eigenprojekte (kein Kunde): eigene Planung Modellieren->Drucken->Fotos->Eintrag->Veröffentlicht.
+crm.get('/crm/self-projects', (req, res) => {
+  const s = calcSettings();
+  const rows = db.prepare(`SELECT p.*, m.title model_title FROM projects p
+    LEFT JOIN models m ON m.design_id=p.design_id WHERE p.self=1
+    ORDER BY p.priority DESC, (p.due_date IS NULL), p.due_date, p.id DESC`).all().map(p => projectWithCalc(p, s));
   res.json(rows);
 });
 
@@ -420,7 +466,116 @@ crm.post('/crm/projects/:id/publish', (req, res) => {
     design_id = pid;
   }
   db.prepare('UPDATE projects SET published=1, design_id=? WHERE id=?').run(design_id, req.params.id);
+  syncUploadTodo(db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id));   // erledigt offene Upload-Aufgabe
   res.json(projectWithCalc(db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id), calcSettings()));
+});
+
+// ---- Filament-Lagerbestand (Spulen) ---------------------------------------
+const spoolLow = () => +getSetting('spool_low_g', '150');
+crm.get('/spools', (req, res) => {
+  const rows = db.prepare('SELECT * FROM spools WHERE COALESCE(archived,0)=0 ORDER BY (remaining_g <= ?) DESC, material, color').all(spoolLow());
+  res.json({ spools: rows, low_g: spoolLow() });
+});
+crm.post('/spools', (req, res) => {
+  const b = req.body || {};
+  const total = b.total_g != null ? +b.total_g : 1000;
+  const r = db.prepare(`INSERT INTO spools(material,color,hex,brand,total_g,remaining_g,cost,note,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?)`).run(b.material || 'PLA', b.color || 'unbenannt', b.hex || null, b.brand || null,
+    total, b.remaining_g != null ? +b.remaining_g : total, +b.cost || 0, b.note || null, nowIso());
+  res.json(db.prepare('SELECT * FROM spools WHERE id=?').get(r.lastInsertRowid));
+});
+crm.put('/spools/:id', (req, res) => {
+  const cur = db.prepare('SELECT * FROM spools WHERE id=?').get(req.params.id);
+  if (!cur) return res.status(404).json({ error: 'unbekannt' });
+  const b = req.body || {}; const g = (k, d) => b[k] !== undefined ? b[k] : d;
+  db.prepare(`UPDATE spools SET material=?,color=?,hex=?,brand=?,total_g=?,remaining_g=?,cost=?,note=?,archived=? WHERE id=?`)
+    .run(g('material', cur.material), g('color', cur.color), g('hex', cur.hex), g('brand', cur.brand),
+      b.total_g != null ? +b.total_g : cur.total_g, b.remaining_g != null ? +b.remaining_g : cur.remaining_g,
+      b.cost != null ? +b.cost : cur.cost, g('note', cur.note), b.archived != null ? (b.archived ? 1 : 0) : cur.archived, req.params.id);
+  res.json(db.prepare('SELECT * FROM spools WHERE id=?').get(req.params.id));
+});
+crm.delete('/spools/:id', (req, res) => { db.prepare('DELETE FROM spools WHERE id=?').run(req.params.id); res.json({ ok: true }); });
+
+// ---- Produktionsplan (offene Druckpositionen ueber alle Projekte) ----------
+crm.get('/crm/production', (req, res) => {
+  const rows = db.prepare(`SELECT i.*, p.title project_title, p.stage, p.id project_id, c.name contact_name,
+      inst.need_ams, inst.title profile_title
+    FROM project_items i
+    JOIN projects p ON p.id=i.project_id
+    JOIN contacts c ON c.id=p.contact_id
+    LEFT JOIN instances inst ON inst.design_id=i.design_id AND inst.instance_id=i.instance_id
+    WHERE p.stage NOT IN ('fertig','abgebrochen')
+    ORDER BY p.id, i.sort, i.id`).all()
+    .map(r => { const remaining = Math.max(0, (r.qty || 0) - (r.printed_qty || 0));
+      return { ...r, remaining, g_total: +(remaining * (r.weight_g || 0)).toFixed(0),
+        min_total: remaining * (r.print_min || 0) }; })
+    .filter(r => r.remaining > 0);
+  const summary = rows.reduce((a, r) => ({ jobs: a.jobs + 1, prints: a.prints + r.remaining,
+    g: a.g + r.g_total, min: a.min + r.min_total }), { jobs: 0, prints: 0, g: 0, min: 0 });
+  // Filament-Bedarf grob je Material (aus verknuepftem Modell nicht ableitbar -> gesamt)
+  const spools = db.prepare('SELECT id,material,color,remaining_g FROM spools WHERE COALESCE(archived,0)=0').all();
+  const stockG = spools.reduce((a, s) => a + (s.remaining_g || 0), 0);
+  res.json({ jobs: rows, summary: { ...summary, g: +summary.g.toFixed(0), h: +(summary.min / 60).toFixed(1) },
+    stockG: +stockG.toFixed(0), enoughStock: stockG >= summary.g });
+});
+// Einen Druck als erledigt verbuchen (+1), optional Gramm von einer Spule abziehen.
+crm.post('/crm/production/print', (req, res) => {
+  const { item_id, spool_id } = req.body || {};
+  const it = db.prepare('SELECT * FROM project_items WHERE id=?').get(item_id);
+  if (!it) return res.status(404).json({ error: 'Position unbekannt' });
+  const done = Math.min((it.qty || 0), (it.printed_qty || 0) + 1);
+  db.prepare('UPDATE project_items SET printed_qty=? WHERE id=?').run(done, item_id);
+  let spool = null;
+  if (spool_id && it.weight_g) {
+    const s = db.prepare('SELECT * FROM spools WHERE id=?').get(spool_id);
+    if (s) { const rem = Math.max(0, (s.remaining_g || 0) - it.weight_g);
+      db.prepare('UPDATE spools SET remaining_g=? WHERE id=?').run(rem, spool_id);
+      spool = db.prepare('SELECT * FROM spools WHERE id=?').get(spool_id); }
+  }
+  res.json({ ok: true, printed_qty: done, spool });
+});
+// Druck zuruecknehmen (-1)
+crm.post('/crm/production/unprint', (req, res) => {
+  const it = db.prepare('SELECT * FROM project_items WHERE id=?').get((req.body || {}).item_id);
+  if (!it) return res.status(404).json({ error: 'Position unbekannt' });
+  db.prepare('UPDATE project_items SET printed_qty=? WHERE id=?').run(Math.max(0, (it.printed_qty || 0) - 1), it.id);
+  res.json({ ok: true });
+});
+
+// ---- .3mf-Datei an ein Projekt haengen (fuer den Statuslink, Modellarbeit) --
+crm.post('/projects/:id/file', (req, res) => {
+  const p = db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id);
+  if (!p) return res.status(404).json({ error: 'unbekannt' });
+  const { name, data } = req.body || {};
+  if (!name || !data) return res.status(400).json({ error: 'name/data fehlt' });
+  if (!/\.3mf$/i.test(name)) return res.status(400).json({ error: 'Nur .3mf-Dateien.' });
+  const buf = Buffer.from(String(data).replace(/^data:[^,]*,/, ''), 'base64');
+  if (!buf.length) return res.status(400).json({ error: 'Leere Datei.' });
+  if (buf.length > 60 * 1024 * 1024) return res.status(413).json({ error: 'Datei zu groß (max. 60 MB).' });
+  const dir = path.join(DATA_DIR, 'project_files', String(p.id));
+  fs.mkdirSync(dir, { recursive: true });
+  if (p.file_path) { try { fs.rmSync(path.join(DATA_DIR, p.file_path)); } catch {} }   // alte ersetzen
+  const safe = name.replace(/[^\w.\- ]/g, '_');
+  const rel = path.posix.join('project_files', String(p.id), safe);
+  fs.writeFileSync(path.join(DATA_DIR, rel), buf);
+  db.prepare('UPDATE projects SET file_name=?, file_path=? WHERE id=?').run(safe, rel, p.id);
+  res.json({ ok: true, file_name: safe, size: buf.length });
+});
+crm.delete('/projects/:id/file', (req, res) => {
+  const p = db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id);
+  if (p?.file_path) { try { fs.rmSync(path.join(DATA_DIR, p.file_path)); } catch {} }
+  db.prepare('UPDATE projects SET file_name=NULL, file_path=NULL WHERE id=?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// ---- Teilbarer Read-only-Statuslink ---------------------------------------
+crm.post('/crm/projects/:id/share', (req, res) => {
+  const p = db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id);
+  if (!p) return res.status(404).json({ error: 'unbekannt' });
+  let token = p.share_token;
+  if ((req.body || {}).disable) { db.prepare('UPDATE projects SET share_token=NULL WHERE id=?').run(p.id); return res.json({ token: null }); }
+  if (!token) { token = crypto.randomBytes(9).toString('base64url'); db.prepare('UPDATE projects SET share_token=? WHERE id=?').run(token, p.id); }
+  res.json({ token });
 });
 
 // Auftraege/Projekte zu einem Modell (Modell <-> Kunde-Verknuepfung)

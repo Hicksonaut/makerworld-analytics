@@ -224,6 +224,31 @@ CREATE TABLE IF NOT EXISTS project_items (
 );
 CREATE INDEX IF NOT EXISTS idx_projectparts ON project_parts(project_id);
 CREATE INDEX IF NOT EXISTS idx_projectitems ON project_items(project_id);
+-- Filament-Lagerbestand (Spulen). remaining_g wird beim Drucken abgebucht.
+CREATE TABLE IF NOT EXISTS spools (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  material   TEXT,                -- PLA, PETG, ...
+  color      TEXT,                -- Farbname
+  hex        TEXT,                -- optionaler Farbwert fuer Swatch
+  brand      TEXT,
+  total_g    REAL DEFAULT 1000,   -- Nenn-/Kaufgewicht
+  remaining_g REAL,               -- aktueller Rest
+  cost       REAL DEFAULT 0,      -- Kaufpreis
+  note       TEXT,
+  archived   INTEGER DEFAULT 0,
+  created_at TEXT
+);
+-- Ausgeloeste Meilensteine (damit Push nicht doppelt feuert).
+CREATE TABLE IF NOT EXISTS milestones (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  design_id  TEXT,                -- NULL = konto-/portfolioweit
+  kind       TEXT,                -- download|point|cold|voucher
+  threshold  REAL,                -- erreichter Schwellwert
+  title      TEXT,
+  date       TEXT,
+  created_at TEXT,
+  UNIQUE(design_id, kind, threshold)
+);
 CREATE INDEX IF NOT EXISTS idx_projects_contact ON projects(contact_id);
 CREATE INDEX IF NOT EXISTS idx_orders_contact ON orders(contact_id);
 CREATE INDEX IF NOT EXISTS idx_orders_design ON orders(design_id);
@@ -270,6 +295,7 @@ CREATE INDEX IF NOT EXISTS idx_todos_design ON todos(design_id);
   add('planned', 'planned INTEGER DEFAULT 0'); // 1 = geplantes Produkt (noch nicht auf MakerWorld)
   add('cover_hash', 'cover_hash TEXT');         // Hash des Titelbilds fuer zuverlaessige Aenderungserkennung
   add('mw_update_time', 'mw_update_time TEXT');  // updateTime von MakerWorld = letzte Bearbeitung
+  add('close_date', 'close_date TEXT');          // manuelles Abschluss-/Zieldatum (Path-Leiste)
   // Bestehende (veroeffentlichte) Modelle als "live" markieren.
   db.exec(`UPDATE models SET status='live' WHERE status IS NULL AND publish_date IS NOT NULL`);
 }
@@ -286,6 +312,44 @@ CREATE INDEX IF NOT EXISTS idx_todos_design ON todos(design_id);
   add('paid', 'paid INTEGER DEFAULT 0');           // bezahlt? (ersetzt Bestell-Status)
   add('qty', 'qty INTEGER DEFAULT 1');             // Stückzahl (fuer Produktverkaeufe)
   add('published', 'published INTEGER DEFAULT 0');  // auf MakerWorld veroeffentlicht/verknuepft
+  add('share_token', 'share_token TEXT');           // Token fuer teilbaren Read-only-Statuslink
+  add('kind', "kind TEXT DEFAULT 'modell_print'");  // 'modell_print' = Modell + Druck | 'modell' = nur Modellarbeit
+  add('no_upload', 'no_upload INTEGER DEFAULT 0');   // 1 = Kunde zahlt fuer Exklusivitaet -> nicht auf MakerWorld hochladen
+  add('no_upload_fee', 'no_upload_fee REAL DEFAULT 5'); // Aufpreis fuer Nicht-Veroeffentlichung
+  add('close_date', 'close_date TEXT');              // Abschlussdatum (Path-Leiste; auto bei stage=fertig)
+  add('file_name', 'file_name TEXT');                // angehaengte .3mf-Datei (nur Modellarbeit-Jobs)
+  add('file_path', 'file_path TEXT');                // Pfad relativ zu data/
+  add('self', 'self INTEGER DEFAULT 0');             // 1 = Eigenprojekt (kein Kunde)
+  add('priority', 'priority INTEGER DEFAULT 1');     // 0 niedrig | 1 normal | 2 hoch | 3 dringend
+}
+// Einmalig: contact_id nullbar machen (fuer Eigenprojekte ohne Kunde). SQLite kann
+// NOT NULL nicht per ALTER entfernen -> transaktionaler Tabellen-Rebuild, dynamisch
+// aus table_info (alle Spalten/Defaults bleiben erhalten). Atomar: alles oder nichts.
+if (getSetting('projects_contact_nullable', '0') !== '1') {
+  try {
+    const info = db.prepare('PRAGMA table_info(projects)').all();
+    if (info.length && info.find(c => c.name === 'contact_id' && c.notnull)) {
+      const defs = info.map(c => { let d = `"${c.name}" ${c.type || ''}`.trim();
+        if (c.pk) d += ' PRIMARY KEY'; if (c.notnull && c.name !== 'contact_id') d += ' NOT NULL';
+        if (c.dflt_value != null) d += ' DEFAULT ' + c.dflt_value; return d; });
+      const cols = info.map(c => `"${c.name}"`).join(',');
+      db.pragma('foreign_keys = OFF');
+      db.transaction(() => {
+        db.exec(`CREATE TABLE projects__new (${defs.join(', ')})`);
+        db.exec(`INSERT INTO projects__new (${cols}) SELECT ${cols} FROM projects`);
+        db.exec('DROP TABLE projects');
+        db.exec('ALTER TABLE projects__new RENAME TO projects');
+      })();
+      db.pragma('foreign_keys = ON');
+      console.log('[migration] projects.contact_id -> nullbar');
+    }
+    setSetting('projects_contact_nullable', '1');
+  } catch (e) { console.log('[migration] contact_id-Rebuild fehlgeschlagen:', e.message); }
+}
+// Druckpositionen: gedruckte Menge (fuer den Produktionsplan)
+{
+  const cols = db.prepare('PRAGMA table_info(project_items)').all().map(c => c.name);
+  if (!cols.includes('printed_qty')) db.exec('ALTER TABLE project_items ADD COLUMN printed_qty INTEGER DEFAULT 0');
 }
 // Todos an Kontakt/Projekt haengbar (CRM-Follow-ups)
 {
