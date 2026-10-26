@@ -45,6 +45,13 @@ async function readSession(page) {
 
 const SESSION_FILE = path.join(DATA_DIR, 'session.json');
 
+// Abbruch eines laufenden Pulls (Watchdog/Button): schliesst den Browser, runPull bricht dann ab.
+let activeCtx = null, abortRequested = false;
+export async function abortPull() {
+  abortRequested = true;
+  try { await activeCtx?.close(); } catch { /* schon zu */ }
+}
+
 // Entschluesselte Session (Cookies) aus dem eingeloggten Profil exportieren,
 // damit sie auf einen anderen Rechner (Pi) uebertragen werden kann.
 export async function exportSession() {
@@ -142,7 +149,7 @@ async function fetchAnalytics(page, buildId, id, from, to, loc = 'en') {
   const u = `https://makerworld.com/_next/data/${buildId}/${loc}/my/data-overview/model/${id}.json`
           + `?designId=${id}&startDate=${from}&endDate=${to}`;
   return page.evaluate(async (url) => {
-    const r = await fetch(url, { credentials: 'include' });
+    const r = await fetch(url, { credentials: 'include', signal: AbortSignal.timeout(45000) });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const t = await r.text();
     if (t.trim().startsWith('<')) throw new Error('HTML statt JSON');
@@ -193,9 +200,7 @@ async function fetchDetail(page, id) {
       likeCount: pick('likeCount','likes'),
       collectCount: pick('collectionCount','collectCount','collects','favoriteCount'),
       commentCount: pick('commentCount','comments'),
-      // MakerWorld hat keine Sterne-Bewertung; Rating bleibt leer.
-      ratingAvg: pick('rating','ratingScore','score','starAvg'),
-      ratingCount: pick('ratingCount','rateCount','reviewCount'),
+      // MakerWorld hat keine Modell-Bewertung (nur je Druckprofil, siehe instances).
       instanceCount: pick('instanceCount','instanceCnt') ?? (Array.isArray(d.instances) ? d.instances.length : null),
       cover: pick('coverUrl','cover','coverImage','thumbnail'),
       license: (v => v && typeof v === 'object' ? (v.name || v.type || null) : v)(pick('license','licenseType')),
@@ -246,7 +251,9 @@ export async function runPull({ mode = 'manual', onLog = () => {} } = {}) {
   const lines = [];
   const log = (m) => { lines.push(m); onLog(m); db.prepare('UPDATE pull_runs SET log=? WHERE id=?').run(lines.join('\n'), runId); };
 
+  abortRequested = false;
   const ctx = await launch(false, true);   // sichtbares Chrome (off-screen), sonst blockt Cloudflare
+  activeCtx = ctx;
   let ok = 0, failed = 0, accountSaved = false;
   try {
     const page = await ctx.newPage();
@@ -288,6 +295,7 @@ export async function runPull({ mode = 'manual', onLog = () => {} } = {}) {
     };
 
     for (let i = 0; i < ids.length; i++) {
+      if (abortRequested) throw new Error('Pull abgebrochen (Timeout oder manueller Abbruch).');
       const id = ids[i];
       try {
         const pp = await analytics(id);
@@ -303,7 +311,7 @@ export async function runPull({ mode = 'manual', onLog = () => {} } = {}) {
         // Zentrale Schreiblogik (inkl. Bilder, Titelbild-Hash, Aenderungserkennung, geplante Merges)
         const r = await writeModel({ id, pp, detail: det, capturedAt });
         ok++;
-        log(`[${i + 1}/${ids.length}] ${r.title} — ${r.days} Tage, ${r.tags} Tags, ${r.images} Bilder` + (r.merged ? ` — geplantes Produkt verschmolzen` : ''));
+        log(`[${i + 1}/${ids.length}] ${r.title} — ${r.days} Tage, ${r.tags} Tags, ${r.images} Bilder` + (r.merged ? ` — geplantes Modell verschmolzen` : ''));
       } catch (e) {
         failed++;
         log(`[${i + 1}/${ids.length}] FEHLER ${id}: ${e.message}`);
@@ -322,7 +330,8 @@ export async function runPull({ mode = 'manual', onLog = () => {} } = {}) {
     onLog('ABBRUCH: ' + e.message);
     throw e;
   } finally {
-    await ctx.close();
+    activeCtx = null;
+    try { await ctx.close(); } catch { /* bereits geschlossen */ }
   }
 }
 

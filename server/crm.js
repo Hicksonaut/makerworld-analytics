@@ -4,11 +4,14 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { db, DATA_DIR, nowIso, getSetting, setSetting } from './db.js';
+import { trashPut, newAcc, addRows, rowsOf } from './trash.js';
 
 export const crm = express.Router();
 
 // ---- Kalkulation (3D-Druck-Kosten) ----------------------------------------
-const TIER_DEFAULT = [{ name: 'Standard', margin: 0.6 }, { name: 'Freunde', margin: 0.2 }];
+const TIER_DEFAULT = [{ name: 'Standard', margin: 0.6, default: true }, { name: 'Freunde', margin: 0.2 }];
+// Standard-Stufe: explizit markiert (default), sonst die erste.
+export const defaultTier = tiers => (tiers || []).find(t => t.default) || (tiers || [])[0] || null;
 export function calcSettings() {
   const tiers = (() => { try { return JSON.parse(getSetting('calc_tiers', JSON.stringify(TIER_DEFAULT))); } catch { return TIER_DEFAULT; } })();
   return {
@@ -16,7 +19,8 @@ export function calcSettings() {
     energy_rate_h: +getSetting('calc_energy_h', '0.2'),
     labor_rate_h: +getSetting('calc_labor_h', '0'),
     round_to: +getSetting('calc_round', '0.5'),
-    tiers
+    tiers,
+    default_tier: defaultTier(tiers)?.name || null
   };
 }
 const roundUp = (x, step) => step > 0 ? +(Math.ceil(x / step) * step).toFixed(2) : +x.toFixed(2);
@@ -34,8 +38,8 @@ export function computeProject(p, parts, s, items = []) {
   const labor = +((p.labor_hours || 0) * s.labor_rate_h).toFixed(2);
   const cost = +(material + labor).toFixed(2);                   // Selbstkosten
   const free = p.margin_tier === 'kostenlos';
-  const tier = s.tiers.find(t => t.name === p.margin_tier);
-  const margin = tier ? tier.margin : (s.tiers[0]?.margin ?? 0.6);
+  const tier = s.tiers.find(t => t.name === p.margin_tier) || defaultTier(s.tiers);
+  const margin = tier ? tier.margin : 0.6;
   // Exklusiv-Aufpreis (Kunde zahlt dafuer, dass das Modell NICHT hochgeladen wird)
   const exclusiveFee = p.no_upload ? +(+p.no_upload_fee || 0).toFixed(2) : 0;
   const base = free ? 0 : roundUp(cost * (1 + margin), s.round_to);
@@ -48,6 +52,17 @@ export function computeProject(p, parts, s, items = []) {
     material, labor, cost, margin, free, suggestion, price, profit, contribution, loss, exclusiveFee,
     filamentG: +filamentG.toFixed(1), printH: +printH.toFixed(2), hasItems };
 }
+// Leichtgewichtig: MakerWorld-Ertrag eines Modells (Projekt-Formular) statt das ganze Modell-Detail zu laden.
+crm.get('/crm/model-earned/:design_id', (req, res) => res.json(modelEarned(req.params.design_id)));
+// Live-Vorschau der Kalkulation fuer das Projekt-Formular: die EINZIGE Rechenlogik ist computeProject (hier);
+// der Browser schickt nur den aktuellen Formularstand und bekommt das Ergebnis zurueck.
+crm.post('/crm/calc', (req, res) => {
+  const b = req.body || {}, p = b.project || {};
+  const num = v => (v === '' || v == null) ? null : +v;
+  const project = { filament_g: num(p.filament_g), print_hours: num(p.print_hours), labor_hours: num(p.labor_hours),
+    margin_tier: p.margin_tier || null, price: num(p.price), no_upload: !!p.no_upload, no_upload_fee: num(p.no_upload_fee) };
+  res.json(computeProject(project, Array.isArray(b.parts) ? b.parts : [], calcSettings(), Array.isArray(b.items) ? b.items : []));
+});
 // MakerWorld-Ertrag des verknuepften Modells (Lifetime Punkte -> EUR + Downloads).
 function modelEarned(design_id) {
   if (!design_id) return null;
@@ -88,6 +103,23 @@ function syncUploadTodo(p) {
     for (const t of open) db.prepare('UPDATE todos SET done=1, done_at=? WHERE id=?').run(nowIso(), t.id);
   }
 }
+// Ein Projekt gilt als "beglichen", wenn es bezahlt ODER kostenlos ist (dann
+// gibt es nichts einzufordern). Voraussetzung fuer Ausliefern/Archivieren.
+const isSettled = p => !!p.paid || p.margin_tier === 'kostenlos' || (p.price != null && p.price <= 0);
+// Auto-Aufgabe: fertig + beglichen -> "Ausliefern: <Titel>".
+// Wird die Aufgabe abgehakt, rueckt das Projekt in die Stufe "ausgeliefert"
+// (siehe Todo-Endpunkt in index.js). Faellt die Voraussetzung weg
+// (Stufe verlassen oder Zahlung zurueckgenommen), wird die offene Aufgabe erledigt.
+function syncDeliverTodo(p) {
+  if (p.self) return;   // Eigenprojekte werden nicht ausgeliefert
+  const open = db.prepare("SELECT id FROM todos WHERE project_id=? AND done=0 AND title LIKE 'Ausliefern:%'").all(p.id);
+  if (p.stage === 'fertig' && isSettled(p)) {
+    if (!open.length) db.prepare('INSERT INTO todos(contact_id,project_id,title,priority,created_at) VALUES(?,?,?,?,?)')
+      .run(p.contact_id, p.id, 'Ausliefern: ' + (p.title || 'Projekt'), 2, nowIso());
+  } else {
+    for (const t of open) db.prepare('UPDATE todos SET done=1, done_at=? WHERE id=?').run(nowIso(), t.id);
+  }
+}
 function projectWithCalc(p, s) {
   const parts = db.prepare(`SELECT pp.id, pp.qty, pt.name, pt.unit, pt.unit_price, pt.category
     FROM project_parts pp JOIN parts pt ON pt.id=pp.part_id WHERE pp.project_id=?`).all(p.id);
@@ -105,16 +137,26 @@ const tagsJson = t => Array.isArray(t) ? (t.length ? JSON.stringify(t) : null)
   : (t ? JSON.stringify(String(t).split(',').map(x => x.trim()).filter(Boolean)) : null);
 
 // ---- Kontakte -------------------------------------------------------------
+// Kennzahlen je Kunde kommen aus den Projekten (die einzige Geld-Logik, siehe /crm/revenue).
+// Gleiche Regeln wie dort: abgebrochene Projekte zaehlen nicht; bezahlt = paid; offen = nicht bezahlt, Preis > 0.
 crm.get('/contacts', (req, res) => {
-  const rows = db.prepare(`
-    SELECT c.*,
-      (SELECT COUNT(*) FROM projects p WHERE p.contact_id=c.id) project_count,
-      (SELECT COUNT(*) FROM orders o WHERE o.contact_id=c.id) order_count,
-      (SELECT COALESCE(SUM(qty*unit_price),0) FROM orders o WHERE o.contact_id=c.id) order_total,
-      (SELECT COALESCE(SUM(qty*unit_price),0) FROM orders o WHERE o.contact_id=c.id AND o.status='bezahlt') revenue_paid,
-      (SELECT MAX(order_date) FROM orders o WHERE o.contact_id=c.id) last_order
-    FROM contacts c ORDER BY c.updated_at DESC, c.id DESC`).all();
-  res.json(rows.map(parseTags));
+  const s = calcSettings();
+  const rows = db.prepare('SELECT c.* FROM contacts c ORDER BY c.updated_at DESC, c.id DESC').all();
+  const agg = {};
+  for (const p of db.prepare('SELECT * FROM projects WHERE contact_id IS NOT NULL').all().map(p => projectWithCalc(p, s))) {
+    const a = agg[p.contact_id] || (agg[p.contact_id] = { project_count: 0, revenue_total: 0, revenue_paid: 0, revenue_open: 0, last_project: null });
+    a.project_count++;
+    if (p.stage !== 'abgebrochen') {
+      const price = p.calc.price || 0;
+      a.revenue_total += price;
+      if (p.paid) a.revenue_paid += price; else if (price > 0) a.revenue_open += price;
+    }
+    const d = (p.close_date || p.created_at || '').slice(0, 10);
+    if (d && (!a.last_project || d > a.last_project)) a.last_project = d;
+  }
+  const r2 = n => +(+n).toFixed(2);
+  res.json(rows.map(c => { const a = agg[c.id] || { project_count: 0, revenue_total: 0, revenue_paid: 0, revenue_open: 0, last_project: null };
+    return parseTags({ ...c, ...a, revenue_total: r2(a.revenue_total), revenue_paid: r2(a.revenue_paid), revenue_open: r2(a.revenue_open) }); }));
 });
 crm.get('/contact/:id', (req, res) => {
   const c = db.prepare('SELECT * FROM contacts WHERE id=?').get(req.params.id);
@@ -123,7 +165,8 @@ crm.get('/contact/:id', (req, res) => {
   const projects = db.prepare(`SELECT p.*, m.title AS model_title FROM projects p
     LEFT JOIN models m ON m.design_id=p.design_id WHERE p.contact_id=? ORDER BY p.id DESC`).all(req.params.id)
     .map(p => projectWithCalc(p, s));
-  const todos = db.prepare('SELECT * FROM todos WHERE contact_id=? ORDER BY done, priority DESC, id').all(req.params.id);
+  const todos = db.prepare(`SELECT t.*, c.name AS contact_name, pr.title AS project_title FROM todos t LEFT JOIN contacts c ON c.id=t.contact_id
+    LEFT JOIN projects pr ON pr.id=t.project_id WHERE t.contact_id=? ORDER BY t.done, t.priority DESC, t.id`).all(req.params.id);
   res.json({ contact: parseTags(c), projects, todos });
 });
 crm.post('/contacts', (req, res) => {
@@ -144,13 +187,26 @@ crm.put('/contacts/:id', (req, res) => {
       b.stage ?? cur.stage, nowIso(), req.params.id);
   res.json(parseTags(db.prepare('SELECT * FROM contacts WHERE id=?').get(req.params.id)));
 });
+// Alles zu einem Projekt fuer den Papierkorb einsammeln (Zeile, Teile, Positionen, Druckprotokoll, Aufgaben, Dateien).
+function gatherProject(id, acc) {
+  addRows(acc, 'projects', rowsOf('projects', 'id=?', id));
+  addRows(acc, 'project_parts', rowsOf('project_parts', 'project_id=?', id));
+  addRows(acc, 'project_items', rowsOf('project_items', 'project_id=?', id));
+  addRows(acc, 'print_log', rowsOf('print_log', 'item_id IN (SELECT id FROM project_items WHERE project_id=?)', id));
+  addRows(acc, 'todos', rowsOf('todos', 'project_id=?', id));
+  acc.files.push('project_files/' + id);
+  return acc;
+}
 crm.delete('/contacts/:id', (req, res) => {
-  db.transaction(() => {
-    db.prepare('DELETE FROM orders WHERE contact_id=?').run(req.params.id);
-    db.prepare('DELETE FROM projects WHERE contact_id=?').run(req.params.id);
-    db.prepare('DELETE FROM contacts WHERE id=?').run(req.params.id);
-  })();
-  res.json({ ok: true });
+  const c = db.prepare('SELECT * FROM contacts WHERE id=?').get(req.params.id);
+  if (!c) return res.json({ ok: true });
+  const acc = newAcc(); addRows(acc, 'contacts', [c]);
+  const pids = db.prepare('SELECT id FROM projects WHERE contact_id=?').all(c.id).map(p => p.id);
+  pids.forEach(pid => gatherProject(pid, acc));
+  addRows(acc, 'todos', rowsOf('todos', 'contact_id=? AND (project_id IS NULL OR project_id NOT IN (SELECT id FROM projects WHERE contact_id=?))', c.id, c.id));
+  const trash_id = trashPut('contact', c.name, acc);          // vor dem Loeschen sichern (verschiebt auch die Dateien)
+  db.transaction(() => { pids.forEach(pid => deleteProjectRows(pid)); db.prepare('DELETE FROM todos WHERE contact_id=?').run(c.id); db.prepare('DELETE FROM contacts WHERE id=?').run(c.id); })();
+  res.json({ ok: true, trash_id });
 });
 
 // ---- Projekte -------------------------------------------------------------
@@ -166,8 +222,9 @@ crm.post('/projects', (req, res) => {
     b.paid ? 1 : 0, b.qty || 1, b.kind === 'modell' ? 'modell' : 'modell_print',
     b.no_upload ? 1 : 0, b.no_upload_fee != null ? +b.no_upload_fee : 5,
     isSelf ? 1 : 0, b.priority != null ? +b.priority : 1, nowIso());
+  if (b.paid) db.prepare('UPDATE projects SET paid_at=? WHERE id=?').run(new Date().toISOString().slice(0, 10), r.lastInsertRowid);
   const np = db.prepare('SELECT * FROM projects WHERE id=?').get(r.lastInsertRowid);
-  syncPaymentTodo(np); syncUploadTodo(np);
+  syncPaymentTodo(np); syncUploadTodo(np); syncDeliverTodo(np);
   res.json(projectWithCalc(np, calcSettings()));
 });
 crm.put('/projects/:id', (req, res) => {
@@ -175,6 +232,11 @@ crm.put('/projects/:id', (req, res) => {
   if (!cur) return res.status(404).json({ error: 'unbekannt' });
   const b = req.body || {};
   const g = (k, d) => b[k] !== undefined ? b[k] : d;
+  // "ausgeliefert"/archiviert nur, wenn das Projekt beglichen ist (bezahlt oder kostenlos).
+  if (g('stage', cur.stage) === 'ausgeliefert' && !isSettled({
+    paid: b.paid !== undefined ? (b.paid ? 1 : 0) : cur.paid,
+    margin_tier: g('margin_tier', cur.margin_tier), price: g('price', cur.price)
+  })) return res.status(400).json({ error: 'Nicht bezahlt: Ausliefern/Archivieren erst nach Zahlung möglich.' });
   db.prepare(`UPDATE projects SET title=?,description=?,design_id=?,stage=?,status=?,due_date=?,
       filament_g=?,print_hours=?,labor_hours=?,margin_tier=?,price=?,paid=?,qty=?,published=?,kind=?,no_upload=?,no_upload_fee=?,close_date=?,priority=? WHERE id=?`)
     .run(g('title', cur.title), g('description', cur.description), g('design_id', cur.design_id),
@@ -189,26 +251,41 @@ crm.put('/projects/:id', (req, res) => {
       b.close_date !== undefined ? (b.close_date || null) : cur.close_date,
       b.priority != null ? +b.priority : cur.priority, req.params.id);
   let upd = db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id);
+  // Zahlungsdatum: beim Setzen von "bezahlt" heute, beim Zuruecknehmen leeren.
+  if (upd.paid && !upd.paid_at) { db.prepare('UPDATE projects SET paid_at=? WHERE id=?').run(new Date().toISOString().slice(0, 10), req.params.id); upd = db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id); }
+  else if (!upd.paid && upd.paid_at) { db.prepare('UPDATE projects SET paid_at=NULL WHERE id=?').run(req.params.id); upd = db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id); }
   // Abschlussdatum automatisch setzen, sobald "fertig"/"publish" und noch keins hinterlegt.
   if ((upd.stage === 'fertig' || upd.stage === 'publish') && !upd.close_date) {
     db.prepare('UPDATE projects SET close_date=? WHERE id=?').run(new Date().toISOString().slice(0, 10), req.params.id);
     upd = db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id);
   }
-  syncPaymentTodo(upd); syncUploadTodo(upd);
+  syncPaymentTodo(upd); syncUploadTodo(upd); syncDeliverTodo(upd);
   res.json(projectWithCalc(upd, calcSettings()));
 });
+// Projektzeilen samt abhaengigen Zeilen loeschen (Dateien: siehe trashPut, dort verschoben).
+function deleteProjectRows(id) {
+  db.transaction(() => {
+    db.prepare('DELETE FROM print_log WHERE item_id IN (SELECT id FROM project_items WHERE project_id=?)').run(id);
+    db.prepare('DELETE FROM project_parts WHERE project_id=?').run(id);
+    db.prepare('DELETE FROM project_items WHERE project_id=?').run(id);
+    db.prepare('DELETE FROM todos WHERE project_id=?').run(id);
+    db.prepare('DELETE FROM projects WHERE id=?').run(id);
+  })();
+}
 crm.delete('/projects/:id', (req, res) => {
-  db.prepare('DELETE FROM project_parts WHERE project_id=?').run(req.params.id);
-  db.prepare('DELETE FROM project_items WHERE project_id=?').run(req.params.id);
-  try { fs.rmSync(path.join(DATA_DIR, 'project_files', String(req.params.id)), { recursive: true, force: true }); } catch {}
-  db.prepare('DELETE FROM projects WHERE id=?').run(req.params.id); res.json({ ok: true });
+  const p = db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id);
+  if (!p) return res.json({ ok: true });
+  const trash_id = trashPut('project', p.title, gatherProject(p.id, newAcc()));
+  deleteProjectRows(p.id);
+  res.json({ ok: true, trash_id });
 });
 crm.get('/project/:id', (req, res) => {
   const p = db.prepare(`SELECT p.*, m.title model_title, c.name contact_name FROM projects p
     LEFT JOIN models m ON m.design_id=p.design_id LEFT JOIN contacts c ON c.id=p.contact_id WHERE p.id=?`).get(req.params.id);
   if (!p) return res.status(404).json({ error: 'unbekannt' });
   const out = projectWithCalc(p, calcSettings());
-  out.todos = db.prepare('SELECT * FROM todos WHERE project_id=? ORDER BY done, priority DESC, id').all(req.params.id);
+  out.todos = db.prepare(`SELECT t.*, c.name AS contact_name, pr.title AS project_title FROM todos t LEFT JOIN contacts c ON c.id=t.contact_id
+    LEFT JOIN projects pr ON pr.id=t.project_id WHERE t.project_id=? ORDER BY t.done, t.priority DESC, t.id`).all(req.params.id);
   res.json(out);
 });
 // Teile in Projekt hinzufuegen/aendern/entfernen
@@ -224,9 +301,10 @@ crm.put('/project-parts/:id', (req, res) => {
   res.json(pp ? projectWithCalc(db.prepare('SELECT * FROM projects WHERE id=?').get(pp.project_id), calcSettings()) : { ok: true });
 });
 crm.delete('/project-parts/:id', (req, res) => {
-  const pp = db.prepare('SELECT project_id FROM project_parts WHERE id=?').get(req.params.id);
+  const pp = db.prepare('SELECT * FROM project_parts WHERE id=?').get(req.params.id);
+  const trash_id = pp ? trashPut('partlink', 'Teil im Projekt', addRows(newAcc(), 'project_parts', [pp])) : null;
   db.prepare('DELETE FROM project_parts WHERE id=?').run(req.params.id);
-  res.json(pp ? projectWithCalc(db.prepare('SELECT * FROM projects WHERE id=?').get(pp.project_id), calcSettings()) : { ok: true });
+  res.json(pp ? { ...projectWithCalc(db.prepare('SELECT * FROM projects WHERE id=?').get(pp.project_id), calcSettings()), trash_id } : { ok: true });
 });
 
 // ---- Druckpositionen (mehrere Modelle/Profile je Projekt) -----------------
@@ -251,9 +329,12 @@ crm.put('/project-items/:iid', (req, res) => {
   res.json(withCalc(cur.project_id));
 });
 crm.delete('/project-items/:iid', (req, res) => {
-  const cur = db.prepare('SELECT project_id FROM project_items WHERE id=?').get(req.params.iid);
+  const cur = db.prepare('SELECT * FROM project_items WHERE id=?').get(req.params.iid);
+  let trash_id = null;
+  if (cur) { const acc = addRows(newAcc(), 'project_items', [cur]); addRows(acc, 'print_log', rowsOf('print_log', 'item_id=?', cur.id)); trash_id = trashPut('item', cur.label || 'Druckposition', acc);
+    db.prepare('DELETE FROM print_log WHERE item_id=?').run(cur.id); }
   db.prepare('DELETE FROM project_items WHERE id=?').run(req.params.iid);
-  res.json(cur ? withCalc(cur.project_id) : { ok: true });
+  res.json(cur ? { ...withCalc(cur.project_id), trash_id } : { ok: true });
 });
 
 // Alle Projekte (fuer die Projekt-Pipeline) inkl. Kunde + Kalkulation
@@ -290,7 +371,13 @@ crm.put('/parts/:id', (req, res) => {
     .run(b.name ?? cur.name, b.category ?? cur.category, b.unit ?? cur.unit, b.unit_price ?? cur.unit_price, b.notes ?? cur.notes, req.params.id);
   res.json(db.prepare('SELECT * FROM parts WHERE id=?').get(req.params.id));
 });
-crm.delete('/parts/:id', (req, res) => { db.prepare('DELETE FROM parts WHERE id=?').run(req.params.id); res.json({ ok: true }); });
+crm.delete('/parts/:id', (req, res) => {
+  const r = db.prepare('SELECT * FROM parts WHERE id=?').get(req.params.id); if (!r) return res.json({ ok: true });
+  const acc = addRows(newAcc(), 'parts', [r]);
+  addRows(acc, 'project_parts', rowsOf('project_parts', 'part_id=?', r.id));
+  const trash_id = trashPut('part', r.name, acc);
+  db.prepare('DELETE FROM parts WHERE id=?').run(req.params.id); res.json({ ok: true, trash_id });
+});
 
 // ---- Kalkulations-Einstellungen (global) ----------------------------------
 const sellerInfo = () => { try { return JSON.parse(getSetting('invoice_seller', '{}')); } catch { return {}; } };
@@ -301,14 +388,28 @@ crm.post('/crm/settings', (req, res) => {
   if (b.energy_rate_h != null) setSetting('calc_energy_h', String(+b.energy_rate_h));
   if (b.labor_rate_h != null) setSetting('calc_labor_h', String(+b.labor_rate_h));
   if (b.round_to != null) setSetting('calc_round', String(+b.round_to));
-  if (Array.isArray(b.tiers)) setSetting('calc_tiers', JSON.stringify(b.tiers.filter(t => t.name)));
+  if (Array.isArray(b.tiers)) {
+    const tiers = b.tiers.filter(t => t.name).map(t => ({ name: String(t.name), margin: +t.margin || 0, ...(t.default ? { default: true } : {}) }));
+    if (tiers.length && !tiers.some(t => t.default)) tiers[0].default = true;       // immer genau eine Standard-Stufe
+    let seen = false; tiers.forEach(t => { if (t.default) { if (seen) delete t.default; seen = true; } });
+    setSetting('calc_tiers', JSON.stringify(tiers));
+  }
   if (b.seller && typeof b.seller === 'object') setSetting('invoice_seller', JSON.stringify(b.seller));
   res.json({ ...calcSettings(), seller: sellerInfo(), invoice_next: +getSetting('invoice_next', '1') });
 });
-// naechste Rechnungsnummer ziehen (hochzaehlen)
-crm.post('/crm/invoice-number', (req, res) => {
-  const n = +getSetting('invoice_next', '1'); setSetting('invoice_next', String(n + 1));
-  res.json({ number: n });
+// Rechnungsnummer je Projekt: beim ersten Erstellen vergeben, danach stabil (erneutes Oeffnen verbraucht keine neue Nummer).
+crm.post('/crm/projects/:id/invoice-number', (req, res) => {
+  const p = db.prepare('SELECT id, invoice_no, invoice_date FROM projects WHERE id=?').get(req.params.id);
+  if (!p) return res.status(404).json({ error: 'unbekannt' });
+  if (!p.invoice_no) {
+    const n = +getSetting('invoice_next', '1');
+    db.transaction(() => {
+      setSetting('invoice_next', String(n + 1));
+      db.prepare('UPDATE projects SET invoice_no=?, invoice_date=? WHERE id=?').run(n, new Date().toISOString().slice(0, 10), p.id);
+    })();
+  }
+  const q = db.prepare('SELECT invoice_no, invoice_date FROM projects WHERE id=?').get(p.id);
+  res.json({ number: q.invoice_no, date: q.invoice_date });
 });
 
 // ---- Betriebsausgaben --------------------------------------------------------
@@ -326,7 +427,12 @@ crm.put('/expenses/:id', (req, res) => {
     .run(b.date ?? c.date, b.category ?? c.category, b.description ?? c.description, b.amount != null ? +b.amount : c.amount, req.params.id);
   res.json(db.prepare('SELECT * FROM expenses WHERE id=?').get(req.params.id));
 });
-crm.delete('/expenses/:id', (req, res) => { db.prepare('DELETE FROM expenses WHERE id=?').run(req.params.id); res.json({ ok: true }); });
+crm.delete('/expenses/:id', (req, res) => {
+  const r = db.prepare('SELECT * FROM expenses WHERE id=?').get(req.params.id); if (!r) return res.json({ ok: true });
+  const acc = addRows(newAcc(), 'expenses', [r]);
+  const trash_id = trashPut('expense', (r.description || 'Ausgabe') + ' ' + (r.amount ?? '') + ' €', acc);
+  db.prepare('DELETE FROM expenses WHERE id=?').run(req.params.id); res.json({ ok: true, trash_id });
+});
 
 // ---- Punkte-Auszahlungen -----------------------------------------------------
 crm.get('/payouts', (req, res) => res.json(db.prepare('SELECT * FROM payouts ORDER BY date DESC, id DESC').all()));
@@ -336,12 +442,17 @@ crm.post('/payouts', (req, res) => {
     .run(b.date || new Date().toISOString().slice(0, 10), +b.points || 0, +b.amount || 0, b.note || null, nowIso());
   res.json(db.prepare('SELECT * FROM payouts WHERE id=?').get(r.lastInsertRowid));
 });
-crm.delete('/payouts/:id', (req, res) => { db.prepare('DELETE FROM payouts WHERE id=?').run(req.params.id); res.json({ ok: true }); });
+crm.delete('/payouts/:id', (req, res) => {
+  const r = db.prepare('SELECT * FROM payouts WHERE id=?').get(req.params.id); if (!r) return res.json({ ok: true });
+  const acc = addRows(newAcc(), 'payouts', [r]);
+  const trash_id = trashPut('payout', 'Auszahlung ' + (r.amount ?? '') + ' €', acc);
+  db.prepare('DELETE FROM payouts WHERE id=?').run(req.params.id); res.json({ ok: true, trash_id });
+});
 
 // ---- Gewinn & Verlust (P&L) --------------------------------------------------
 crm.get('/crm/pnl', (req, res) => {
   const s = calcSettings();
-  const projInc = db.prepare("SELECT COALESCE(due_date,created_at) d, price FROM projects WHERE paid=1 AND price>0").all();
+  const projInc = db.prepare("SELECT COALESCE(paid_at,due_date,created_at) d, price FROM projects WHERE paid=1 AND price>0").all();
   const payouts = db.prepare('SELECT date d, amount FROM payouts').all();
   const expenses = db.prepare('SELECT date d, amount, category FROM expenses').all();
   const monthKey = x => (x || '').slice(0, 7);
@@ -362,26 +473,6 @@ crm.get('/crm/pnl', (req, res) => {
   res.json({ monthly, totals, expByCat, walletOpenEur: walletEur });
 });
 
-// ---- Bestellungen ---------------------------------------------------------
-crm.post('/orders', (req, res) => {
-  const b = req.body || {};
-  if (!b.contact_id) return res.status(400).json({ error: 'contact_id fehlt' });
-  const r = db.prepare(`INSERT INTO orders(contact_id,project_id,design_id,title,qty,unit_price,status,order_date,notes,created_at)
-    VALUES(?,?,?,?,?,?,?,?,?,?)`).run(b.contact_id, b.project_id || null, b.design_id || null, b.title || null,
-    b.qty || 1, b.unit_price || 0, b.status || 'angefragt', b.order_date || new Date().toISOString().slice(0, 10), b.notes || null, nowIso());
-  res.json(db.prepare('SELECT *, (qty*unit_price) amount FROM orders WHERE id=?').get(r.lastInsertRowid));
-});
-crm.put('/orders/:id', (req, res) => {
-  const cur = db.prepare('SELECT * FROM orders WHERE id=?').get(req.params.id);
-  if (!cur) return res.status(404).json({ error: 'unbekannt' });
-  const b = req.body || {};
-  db.prepare('UPDATE orders SET project_id=?,design_id=?,title=?,qty=?,unit_price=?,status=?,order_date=?,notes=? WHERE id=?')
-    .run(b.project_id ?? cur.project_id, b.design_id ?? cur.design_id, b.title ?? cur.title, b.qty ?? cur.qty,
-      b.unit_price ?? cur.unit_price, b.status ?? cur.status, b.order_date ?? cur.order_date, b.notes ?? cur.notes, req.params.id);
-  res.json(db.prepare('SELECT *, (qty*unit_price) amount FROM orders WHERE id=?').get(req.params.id));
-});
-crm.delete('/orders/:id', (req, res) => { db.prepare('DELETE FROM orders WHERE id=?').run(req.params.id); res.json({ ok: true }); });
-
 // ---- Umsatz-Auswertung (projektbasiert) -----------------------------------
 crm.get('/crm/revenue', (req, res) => {
   const s = calcSettings();
@@ -392,7 +483,7 @@ crm.get('/crm/revenue', (req, res) => {
   const paid = +active.filter(p => p.paid).reduce((a, p) => a + (p.calc.price || 0), 0).toFixed(2);
   const open = +active.filter(p => !p.paid && p.calc.price > 0).reduce((a, p) => a + (p.calc.price || 0), 0).toFixed(2);
   const total = +(paid + open).toFixed(2);
-  const monthly = (() => { const m = {}; active.filter(p => p.paid).forEach(p => { const k = (p.due_date || p.created_at || '').slice(0, 7); if (k) m[k] = (m[k] || 0) + (p.calc.price || 0); });
+  const monthly = (() => { const m = {}; active.filter(p => p.paid).forEach(p => { const k = (p.paid_at || p.due_date || p.created_at || '').slice(0, 7); if (k) m[k] = (m[k] || 0) + (p.calc.price || 0); });
     return Object.entries(m).sort().map(([mm, sum]) => ({ m: mm, sum: +sum.toFixed(2) })); })();
   const agg = (keyFn) => { const o = {}; active.forEach(p => { const k = keyFn(p); if (k == null) return;
     const e = o[k] || (o[k] = { sum: 0, paid: 0, cnt: 0 }); e.sum += p.calc.price || 0; e.paid += p.paid ? (p.calc.price || 0) : 0; e.cnt++; }); return o; };
@@ -414,15 +505,13 @@ crm.get('/crm/revenue', (req, res) => {
   for (const k of ['material','cost','revenue','profit','loss']) projectStats[k] = +projectStats[k].toFixed(2);
   projectStats.mwFromProjects = +mwFromProjects.toFixed(2);
   projectStats.grandTotal = +(projectStats.revenue - projectStats.material + mwFromProjects).toFixed(2);
-  const freeButEarning = allProj.filter(p => (p.calc.free || p.calc.price <= 0) && (p.calc.mwEarned || 0) > 0)
-    .map(p => ({ id: p.id, title: p.title, contact_name: p.contact_name, model_title: p.model_title, design_id: p.design_id, mwEarned: p.calc.mwEarned, material: p.calc.material, net: +((p.calc.mwEarned || 0) - p.calc.material).toFixed(2) }))
-    .sort((a, b) => b.mwEarned - a.mwEarned);
 
   // Projekte, deren (privat entstandenes) Modell auf MakerWorld Geld/Credits macht.
   // Union aus primaerem Modell + Modellen der Druckpositionen; nur echte Modelle.
   const realModel = db.prepare("SELECT title, COALESCE(planned,0) planned FROM models WHERE design_id=?");
   const itemDesigns = db.prepare("SELECT DISTINCT design_id FROM project_items WHERE project_id=? AND design_id IS NOT NULL");
   const projectModels = [];
+  const countedModels = new Set();   // jedes Modell nur EINMAL in die Summe (mehrere Projekte koennen dasselbe Modell nutzen)
   active.forEach(p => {
     const ids = new Set(); if (p.design_id) ids.add(p.design_id);
     itemDesigns.all(p.id).forEach(r => ids.add(r.design_id));
@@ -431,16 +520,20 @@ crm.get('/crm/revenue', (req, res) => {
       const e = modelEarned(did); if (!e) return;
       const isPrimary = did === p.design_id;
       const invest = isPrimary ? p.calc.material : 0;   // Material nur einmal (Primaermodell) gegenrechnen
+      const counted = !countedModels.has(did); countedModels.add(did);
       projectModels.push({ project_id: p.id, title: p.title, contact_name: p.contact_name,
         design_id: did, model_title: m.title, downloads: e.download, points: e.point, mwEarned: e.earned,
-        material: +invest.toFixed(2), net: +(e.earned - invest).toFixed(2),
+        material: +invest.toFixed(2), net: +(e.earned - invest).toFixed(2), counted,
         free: !!(p.calc.free || p.calc.price <= 0), paid: !!p.paid, price: p.calc.price || 0 });
     });
   });
   projectModels.sort((a, b) => b.mwEarned - a.mwEarned);
-  const projectModelsTotal = +projectModels.reduce((a, r) => a + r.mwEarned, 0).toFixed(2);
+  const projectModelsTotal = +projectModels.filter(r => r.counted).reduce((a, r) => a + r.mwEarned, 0).toFixed(2);
+  // Eine Quelle fuer den MakerWorld-Ertrag: Karte oben und Tabellensumme muessen identisch sein.
+  projectStats.mwFromProjects = projectModelsTotal;
+  projectStats.grandTotal = +(projectStats.revenue - projectStats.material + projectModelsTotal).toFixed(2);
 
-  res.json({ total, paid, open, monthly, bySource, byContact, byModel, projectStats, freeButEarning,
+  res.json({ total, paid, open, monthly, bySource, byContact, byModel, projectStats,
     projectModels, projectModelsTotal,
     contacts: db.prepare('SELECT COUNT(*) c FROM contacts').get().c,
     openLeads: db.prepare("SELECT COUNT(*) c FROM contacts WHERE stage NOT IN ('gewonnen','verloren')").get().c });
@@ -454,7 +547,7 @@ crm.get('/crm/model-suggestions', (req, res) => {
     return { ...m, score }; }).filter(m => m.score > 0).sort((a, b) => b.score - a.score).slice(0, 6);
   res.json(scored);
 });
-// Projekt als "auf MakerWorld veroeffentlicht" markieren; ohne Modell -> geplantes Produkt anlegen
+// Projekt als "auf MakerWorld veroeffentlicht" markieren; ohne Modell -> geplantes Modell anlegen
 crm.post('/crm/projects/:id/publish', (req, res) => {
   const p = db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id);
   if (!p) return res.status(404).json({ error: 'unbekannt' });
@@ -494,7 +587,13 @@ crm.put('/spools/:id', (req, res) => {
       b.cost != null ? +b.cost : cur.cost, g('note', cur.note), b.archived != null ? (b.archived ? 1 : 0) : cur.archived, req.params.id);
   res.json(db.prepare('SELECT * FROM spools WHERE id=?').get(req.params.id));
 });
-crm.delete('/spools/:id', (req, res) => { db.prepare('DELETE FROM spools WHERE id=?').run(req.params.id); res.json({ ok: true }); });
+crm.delete('/spools/:id', (req, res) => {
+  const r = db.prepare('SELECT * FROM spools WHERE id=?').get(req.params.id); if (!r) return res.json({ ok: true });
+  const acc = addRows(newAcc(), 'spools', [r]);
+  addRows(acc, 'print_log', rowsOf('print_log', 'spool_id=?', r.id));
+  const trash_id = trashPut('spool', (r.material || '') + ' ' + (r.color || ''), acc);
+  db.prepare('DELETE FROM spools WHERE id=?').run(req.params.id); res.json({ ok: true, trash_id });
+});
 
 // ---- Produktionsplan (offene Druckpositionen ueber alle Projekte) ----------
 crm.get('/crm/production', (req, res) => {
@@ -504,7 +603,7 @@ crm.get('/crm/production', (req, res) => {
     JOIN projects p ON p.id=i.project_id
     JOIN contacts c ON c.id=p.contact_id
     LEFT JOIN instances inst ON inst.design_id=i.design_id AND inst.instance_id=i.instance_id
-    WHERE p.stage NOT IN ('fertig','abgebrochen')
+    WHERE p.stage NOT IN ('fertig','abgebrochen','ausgeliefert')
     ORDER BY p.id, i.sort, i.id`).all()
     .map(r => { const remaining = Math.max(0, (r.qty || 0) - (r.printed_qty || 0));
       return { ...r, remaining, g_total: +(remaining * (r.weight_g || 0)).toFixed(0),
@@ -528,9 +627,12 @@ crm.post('/crm/production/print', (req, res) => {
   let spool = null;
   if (spool_id && it.weight_g) {
     const s = db.prepare('SELECT * FROM spools WHERE id=?').get(spool_id);
-    if (s) { const rem = Math.max(0, (s.remaining_g || 0) - it.weight_g);
-      db.prepare('UPDATE spools SET remaining_g=? WHERE id=?').run(rem, spool_id);
-      spool = db.prepare('SELECT * FROM spools WHERE id=?').get(spool_id); }
+    if (s) {
+      const grams = Math.min(+it.weight_g, s.remaining_g || 0);   // tatsaechlich abgebuchte Menge (nie unter 0)
+      db.prepare('UPDATE spools SET remaining_g=? WHERE id=?').run(Math.max(0, (s.remaining_g || 0) - it.weight_g), spool_id);
+      db.prepare('INSERT INTO print_log(item_id,spool_id,grams,created_at) VALUES(?,?,?,?)').run(item_id, spool_id, grams, nowIso());
+      spool = db.prepare('SELECT * FROM spools WHERE id=?').get(spool_id);
+    }
   }
   res.json({ ok: true, printed_qty: done, spool });
 });
@@ -539,7 +641,15 @@ crm.post('/crm/production/unprint', (req, res) => {
   const it = db.prepare('SELECT * FROM project_items WHERE id=?').get((req.body || {}).item_id);
   if (!it) return res.status(404).json({ error: 'Position unbekannt' });
   db.prepare('UPDATE project_items SET printed_qty=? WHERE id=?').run(Math.max(0, (it.printed_qty || 0) - 1), it.id);
-  res.json({ ok: true });
+  // Letzte Abbuchung dieser Position zurueckbuchen (Gramm zurueck auf die Spule, hoechstens bis Nenngewicht).
+  let spool = null;
+  const last = db.prepare('SELECT * FROM print_log WHERE item_id=? ORDER BY id DESC LIMIT 1').get(it.id);
+  if (last) {
+    const s = last.spool_id ? db.prepare('SELECT * FROM spools WHERE id=?').get(last.spool_id) : null;
+    if (s) { db.prepare('UPDATE spools SET remaining_g=? WHERE id=?').run(Math.min(s.total_g || 1e9, (s.remaining_g || 0) + (last.grams || 0)), s.id); spool = db.prepare('SELECT * FROM spools WHERE id=?').get(s.id); }
+    db.prepare('DELETE FROM print_log WHERE id=?').run(last.id);
+  }
+  res.json({ ok: true, spool });
 });
 
 // ---- .3mf-Datei an ein Projekt haengen (fuer den Statuslink, Modellarbeit) --
@@ -576,13 +686,4 @@ crm.post('/crm/projects/:id/share', (req, res) => {
   if ((req.body || {}).disable) { db.prepare('UPDATE projects SET share_token=NULL WHERE id=?').run(p.id); return res.json({ token: null }); }
   if (!token) { token = crypto.randomBytes(9).toString('base64url'); db.prepare('UPDATE projects SET share_token=? WHERE id=?').run(token, p.id); }
   res.json({ token });
-});
-
-// Auftraege/Projekte zu einem Modell (Modell <-> Kunde-Verknuepfung)
-crm.get('/crm/model/:design_id', (req, res) => {
-  const orders = db.prepare(`SELECT o.*, (o.qty*o.unit_price) amount, c.name contact_name FROM orders o
-    JOIN contacts c ON c.id=o.contact_id WHERE o.design_id=? ORDER BY o.order_date DESC`).all(req.params.design_id);
-  const projects = db.prepare(`SELECT p.*, c.name contact_name FROM projects p
-    JOIN contacts c ON c.id=p.contact_id WHERE p.design_id=? ORDER BY p.id DESC`).all(req.params.design_id);
-  res.json({ orders, projects });
 });

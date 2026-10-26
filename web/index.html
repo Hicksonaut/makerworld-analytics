@@ -4,49 +4,48 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MakerWorld Analytics</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
   <link rel="stylesheet" href="styles.css">
   <script src="vendor/chart.umd.min.js"></script>
 </head>
 <body>
-  <aside class="sidebar">
+  <a class="skip" href="#view">Zum Inhalt springen</a>
+  <header class="topbar">
+    <button id="navToggle" class="navtoggle" aria-label="Menü öffnen" aria-expanded="false" aria-controls="sidebar">&#9776;</button>
+    <span class="topbar-title">MakerWorld Analytics</span>
+  </header>
+  <div id="navScrim" class="scrim" hidden></div>
+  <aside class="sidebar" id="sidebar">
     <div class="brand"><span class="logo">MW</span><div><b>ANALYTICS</b><small id="handle">@you</small></div></div>
-    <div class="searchbox"><input id="globalSearch" placeholder="Suche (Modelle, Kunden, Projekte)" autocomplete="off"><div id="searchResults" class="search-results" hidden></div></div>
-    <nav>
-      <a data-route="heute" class="active">Heute</a>
+    <div class="searchbox"><input id="globalSearch" type="search" aria-label="Suche in Modellen, Kunden und Projekten" placeholder="Suche (Modelle, Kunden, Projekte)" autocomplete="off"><div id="searchResults" class="search-results" hidden></div></div>
+    <nav aria-label="Hauptnavigation">
+      <a data-section="heute" data-route="heute" href="#heute" class="active">Heute</a>
       <div class="nav-sep">Analyse</div>
-      <a data-route="overview">Übersicht</a>
-      <a data-route="momentum">Momentum</a>
-      <a data-route="compare">Vergleich</a>
-      <a data-route="groups">Kategorien</a>
-      <a data-route="points">Punkte</a>
-      <a data-route="report">Bericht</a>
-      <div class="nav-sep">CRM</div>
-      <a data-route="contacts">Kunden</a>
-      <a data-route="leads">Leads</a>
-      <a data-route="projekte">Projekte</a>
-      <a data-route="revenue">Finanzen</a>
-      <a data-route="teile">Teile &amp; Kalkulation</a>
+      <a data-section="modelle" data-route="overview" href="#modelle">Modelle</a>
+      <a data-section="auswertung" data-route="report" href="#auswertung">Auswertung</a>
+      <div class="nav-sep">Geschäft</div>
+      <a data-section="kunden" data-route="contacts" href="#kunden">Kunden</a>
+      <a data-section="projekte" data-route="projekte" href="#projekte">Projekte</a>
+      <a data-section="revenue" data-route="revenue" href="#revenue">Finanzen</a>
       <div class="nav-sep">Produktion</div>
-      <a data-route="pipeline">Produkte</a>
-      <a data-route="selbst">Eigenprojekte</a>
-      <a data-route="druckplan">Druckplan</a>
-      <a data-route="material">Filament-Lager</a>
-      <a data-route="todos">Todos<span class="cnt" id="todoCnt">0</span></a>
+      <a data-section="entwuerfe" data-route="pipeline" href="#entwuerfe">Ideen &amp; Entwürfe</a>
+      <a data-section="materialkalk" data-route="teile" href="#materialkalk">Material &amp; Kalkulation</a>
       <div class="nav-sep">System</div>
-      <a data-route="data">Daten &amp; Pull</a>
+      <a data-section="todos" data-route="todos" href="#todos">Aufgaben<span class="cnt" id="todoCnt">0</span></a>
+      <a data-section="data" data-route="data" href="#data">Daten &amp; Pull</a>
     </nav>
     <div class="pull-box">
       <button id="pullBtn" class="btn primary">Live-Pull starten</button>
       <div id="pullStatus" class="pull-status"></div>
     </div>
-    <div class="langsw" id="langSw"><a data-lang="de">DE</a><span>·</span><a data-lang="en">EN</a></div>
+    <div class="langsw" id="langSw"><a data-lang="de" href="#" role="button">DE</a><span>·</span><a data-lang="en" href="#" role="button">EN</a></div>
     <div class="sidefoot" id="lastPull"></div>
   </aside>
 
-  <main id="view"><div class="loading">lädt …</div></main>
+  <main id="view" tabindex="-1"><div class="loading">lädt …</div></main>
 
   <!-- Modell-Detail Overlay -->
-  <div id="drawer" class="drawer hidden"><div class="drawer-inner"></div></div>
+  <div id="drawer" class="drawer hidden"><div class="drawer-inner" role="dialog" aria-modal="true" aria-label="Details" tabindex="-1"></div></div>
 </body>
 <script src="app.js"></script>
 </html>

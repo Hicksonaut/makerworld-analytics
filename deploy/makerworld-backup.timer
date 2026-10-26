@@ -1,0 +1,10 @@
+[Unit]
+Description=MakerWorld Analytics - Backup taeglich 04:15 (nach dem 03:00-Pull)
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

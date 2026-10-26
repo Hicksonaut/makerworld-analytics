@@ -14,6 +14,10 @@ Environment=NODE_ENV=production
 ExecStart=/usr/bin/xvfb-run -a --server-args="-screen 0 1400x1000x24" /usr/bin/node server/index.js
 Restart=on-failure
 RestartSec=5
+# Speicher-Schutz (die Pi teilt sich 4 GB mit Home Assistant & Co.): Wird der Speicher knapp, soll der Kernel
+# zuerst DIESEN Dienst (Dashboard + Pull-Chromium) beenden und nicht Home Assistant. (MemoryMax wuerde auf der Pi
+# nur mit cgroup_enable=memory im Kernel-Boot-Parameter greifen - ist hier nicht aktiv.)
+OOMScoreAdjust=400
 
 [Install]
 WantedBy=multi-user.target

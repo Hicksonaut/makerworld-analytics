@@ -4,38 +4,113 @@ import cron from 'node-cron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { db, DATA_DIR, getSetting, setSetting, nowIso } from './db.js';
-import { importExport } from './importer.js';
-import { writeModel, startRun, finishRun } from './ingest.js';
 import { crm } from './crm.js';
+import { trashPut, trashRestore, trashPurge, trashList, purgeOld, newAcc, addRows, rowsOf } from './trash.js';
 import { renderStatus, projectFileByToken } from './publicPage.js';
 import fs from 'fs';
+import os from 'os';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const app = express();
-app.use(express.json({ limit: '80mb' }));
-app.use(express.urlencoded({ limit: '80mb', extended: true }));
+app.disable('x-powered-by');
+
+// ---- Schutz ohne Anmeldung ----------------------------------------------------------------
+// Die App hat bewusst kein Passwort. Damit trotzdem keine fremde Webseite im Browser des Nutzers
+// (CSRF) oder per DNS-Rebinding an die API kommt:
+//  1. Host-Header muss ein lokaler/privater Name oder eine private IP sein (LAN, Tailscale, WireGuard).
+//     Weitere Namen per Umgebungsvariable ALLOWED_HOSTS="a.example.com,b.example.com".
+//  2. Schreibende Anfragen (POST/PUT/DELETE) mit Origin-Header muessen von derselben Adresse kommen.
+const EXTRA_HOSTS = String(process.env.ALLOWED_HOSTS || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+const hostOnly = h => { h = String(h || '').toLowerCase(); return h.startsWith('[') ? h.slice(0, h.indexOf(']') + 1) : h.split(':')[0]; };
+const PRIVATE_HOST = new RegExp('^(localhost|127(\\.\\d+){3}|\\[::1\\]|10(\\.\\d+){3}|192\\.168(\\.\\d+){2}|172\\.(1[6-9]|2\\d|3[01])(\\.\\d+){2}'
+  + '|169\\.254(\\.\\d+){2}|100\\.(6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])(\\.\\d+){2}|\\[(fd|fe80)[0-9a-f:]*\\]|[^.]+|.+\\.(local|lan|fritz\\.box|home\\.arpa|ts\\.net))$');
+const hostAllowed = h => PRIVATE_HOST.test(h) || EXTRA_HOSTS.includes(h);
+app.use((req, res, next) => {
+  const host = hostOnly(req.headers.host);
+  if (!hostAllowed(host)) { console.log('[security] Host abgelehnt:', req.headers.host); return res.status(403).type('text').send('Host nicht erlaubt.'); }
+  res.set({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin', 'Content-Security-Policy': "frame-ancestors 'none'" });
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    const origin = req.headers.origin;
+    let bad = req.headers['sec-fetch-site'] === 'cross-site' || origin === 'null';
+    if (origin && origin !== 'null') { try { bad = bad || new URL(origin).host !== req.headers.host; } catch { bad = true; } }
+    if (bad) { console.log('[security] Fremde Herkunft abgelehnt:', req.method, req.url, origin); return res.status(403).json({ error: 'Anfrage von fremder Herkunft abgelehnt.' }); }
+  }
+  next();
+});
+
+// Body-Limits: nur der .3mf-Upload darf gross sein (60 MB als Base64 ~ 80 MB); alles andere 2 MB.
+app.use('/api/projects/:id/file', express.json({ limit: '85mb' }));
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ limit: '2mb', extended: true }));
 app.use('/api', crm);
 
 // ---- Pull-Status (eine Instanz gleichzeitig) ------------------------------
 const pullState = { running: false, mode: null, startedAt: null, log: [], lastResult: null };
 function pushLog(m) { pullState.log.push(m); if (pullState.log.length > 500) pullState.log.shift(); }
 
+// Watchdog: ein Pull, der laenger laeuft, wird abgebrochen (haengendes Chromium/Request).
+// Normal dauert ein Pull ~5 Min fuer 22 Modelle; 25 Min lassen reichlich Luft fuers Wachstum.
+const PULL_TIMEOUT_MS = +process.env.PULL_TIMEOUT_MS || 25 * 60 * 1000;
+
+// Pull-Laeufe, die noch als "running" stehen, obwohl keiner laeuft (Absturz/Neustart/Timeout), schliessen.
+function closeStaleRuns(reason) {
+  const r = db.prepare(`UPDATE pull_runs SET status='error', finished_at=?, log=COALESCE(log,'') || ? WHERE status='running'`)
+    .run(nowIso(), '\nABBRUCH: ' + reason);
+  if (r.changes) console.log(`[pull] ${r.changes} haengenden Lauf als Fehler markiert (${reason})`);
+  return r.changes;
+}
+
+// Ein Pull startet ein vollstaendiges Chromium (Spitze ~1,2 GB RAM). Bei knappem Arbeitsspeicher
+// (die Pi teilt sich 4 GB mit Home Assistant & Co.) erst warten, statt einen OOM-Kill zu riskieren.
+const PULL_MIN_RAM_MB = +process.env.PULL_MIN_RAM_MB || 800;
+async function waitForRam(onLog) {
+  for (let i = 0; i < 20; i++) {                 // bis zu 10 Minuten (20 x 30 s)
+    const m = memAvailableMb();
+    if (m == null || m >= PULL_MIN_RAM_MB) return true;
+    if (i === 0) onLog(`Wenig freier RAM (${m} MB, benoetigt ~${PULL_MIN_RAM_MB} MB) - warte ...`);
+    await new Promise(r => setTimeout(r, +process.env.PULL_RAM_WAIT_MS || 30000));
+  }
+  return false;
+}
+
 async function startPull(mode) {
   if (pullState.running) return { started: false, reason: 'Ein Pull laeuft bereits.' };
   pullState.running = true; pullState.mode = mode; pullState.startedAt = nowIso(); pullState.log = [];
   pushLog(`Pull gestartet (${mode}) ...`);
+  let timedOut = false;
+  let watchdog = setTimeout(async () => {
+    timedOut = true;
+    pushLog(`WATCHDOG: Pull laeuft laenger als ${PULL_TIMEOUT_MS / 60000} Min - wird abgebrochen.`);
+    try { const { abortPull } = await import('./scraper.js'); await abortPull(); } catch (e) { pushLog('Abbruch: ' + e.message); }
+    // Falls runPull trotzdem nicht zurueckkehrt: Zustand nach 60 s zwangsweise freigeben.
+    setTimeout(() => {
+      if (!pullState.running) return;
+      pushLog('WATCHDOG: Zustand zwangsweise zurueckgesetzt.');
+      closeStaleRuns('Watchdog-Timeout');
+      pullState.lastResult = { ok: false, error: 'Watchdog-Timeout', at: nowIso() }; pullState.running = false;
+    }, 60000);
+  }, PULL_TIMEOUT_MS);
   (async () => {
     try {
+      if (!(await waitForRam(pushLog))) {
+        const msg = `Zu wenig freier Arbeitsspeicher (< ${PULL_MIN_RAM_MB} MB) - Pull nicht gestartet.`;
+        const now = nowIso();   // als Fehlerlauf in die Historie, damit Systemhinweise/Health es zeigen
+        db.prepare(`INSERT INTO pull_runs(started_at,finished_at,status,mode,models_ok,models_failed,log) VALUES(?,?,?,?,0,0,?)`).run(now, now, 'error', mode, 'ABBRUCH: ' + msg);
+        throw new Error(msg);
+      }
       const { runPull } = await import('./scraper.js');   // lazy: Server startet auch ohne Playwright
       const res = await runPull({ mode, onLog: pushLog });
       pullState.lastResult = { ok: true, ...res, at: nowIso() };
       try { await checkMilestones(); } catch (e) { pushLog('Meilenstein-Check: ' + e.message); }
       try { await sendDigest('pull'); } catch {}   // Digest/Push nach erfolgreichem Pull
     } catch (e) {
-      pushLog('Fehler: ' + e.message);
-      pullState.lastResult = { ok: false, error: e.message, at: nowIso() };
-    } finally { pullState.running = false; }
+      const msg = timedOut ? `Watchdog: Pull nach ${+(PULL_TIMEOUT_MS / 60000).toFixed(1)} Min abgebrochen (${e.message})` : e.message;
+      pushLog('Fehler: ' + msg);
+      pullState.lastResult = { ok: false, error: msg, at: nowIso() };
+      if (timedOut) db.prepare("UPDATE pull_runs SET log=COALESCE(log,'') || ? WHERE id=(SELECT MAX(id) FROM pull_runs)").run('\n' + msg);
+      try { await pushNotify('MakerWorld Pull fehlgeschlagen', msg); } catch {}
+    } finally { clearTimeout(watchdog); pullState.running = false; }
   })();
   return { started: true };
 }
@@ -51,7 +126,7 @@ const latestSnapSub = `
 function modelsWithKpis() {
   return db.prepare(`
     SELECT m.*, s.impression, s.view, s.download, s.print, s.collect, s."like", s.follower,
-           s.point, s.boost, s.ctr_pct, s.rating_avg, s.rating_count, s.like_count, s.collect_count,
+           s.point, s.boost, s.ctr_pct, s.like_count, s.collect_count,
            s.comment_count, s.captured_at AS snap_at
     FROM models m
     LEFT JOIN (${latestSnapSub}) s ON s.design_id = m.design_id
@@ -123,7 +198,30 @@ function attachForecast(models) {
   return models;
 }
 
-const DEFAULT_RATE = 40 / 524;   // 524 Punkte = 40 EUR-Gutschein
+// 524 Punkte = 40 EUR-Gutschein (MakerWorld). Eine Stelle fuer die Konstanten.
+const VOUCHER_POINTS = 524, VOUCHER_EUR = 40;
+const DEFAULT_RATE = VOUCHER_EUR / VOUCHER_POINTS;
+// Gutschein-Status aus Kontostand + erwarteten Punkten je Tag. EINZIGE Quelle fuer die ETA
+// (Uebersicht, Heute-Insights, Bericht) - Basis ist die Trend-Prognose (attachForecast, 90 Tage).
+function voucherStatus(walletPts, perDayPts) {
+  const remaining = Math.max(0, VOUCHER_POINTS - ((walletPts || 0) % VOUCHER_POINTS));
+  return { remaining: Math.round(remaining), perDay: perDayPts, etaDays: perDayPts > 0 ? Math.ceil(remaining / perDayPts) : null };
+}
+// ---- Gruppierung (Kategorie / eigene Gruppe / Hashtag): EINE Stelle fuer Schluessel + Aggregation ----
+const parseTags = m => { try { return m.tags ? JSON.parse(m.tags) : []; } catch { return []; } };
+function groupKeysOf(m, by) {
+  if (by === 'tag') { const t = parseTags(m); return t.length ? t : ['—']; }
+  return [(by === 'group' ? m.group_label : m.category) || '—'];
+}
+const GROUP_SUM = ['view', 'impression', 'download', 'print', 'collect', 'like', 'point', 'boost', 'dl30', 'v30'];
+function aggregateGroups(models, by) {
+  const buckets = {};
+  for (const m of models) for (const key of groupKeysOf(m, by)) {
+    const b = buckets[key] || (buckets[key] = { key, count: 0, ...Object.fromEntries(GROUP_SUM.map(k => [k, 0])) });
+    b.count++; for (const k of GROUP_SUM) b[k] += (m[k] || 0);
+  }
+  return Object.values(buckets).map(b => ({ ...b, ctr: b.impression ? +((b.view / b.impression) * 100).toFixed(2) : null })).sort((a, b) => b.download - a.download);
+}
 const eurRate = () => { const r = parseFloat(getSetting('eur_per_point', String(DEFAULT_RATE))); return Number.isFinite(r) ? r : DEFAULT_RATE; };
 
 app.get('/api/overview', (req, res) => {
@@ -148,10 +246,9 @@ app.get('/api/overview', (req, res) => {
   if (account) account.wallet_eur = +(((account.point || 0) * rate)).toFixed(2);
   // ETA bis zum naechsten 40-EUR-Gutschein (524 Punkte) - echter Kontostand bevorzugt
   const walletPts = account?.point != null ? account.point : totals.point;
-  const perDayPts = totals.proj_pts30 / 30;
-  const remain = Math.max(0, 524 - (walletPts % 524));
-  totals.voucher_remaining = Math.round(remain);
-  totals.voucher_eta_days = perDayPts > 0 ? Math.ceil(remain / perDayPts) : null;
+  const vs = voucherStatus(walletPts, totals.proj_pts30 / 30);
+  totals.voucher_remaining = vs.remaining;
+  totals.voucher_eta_days = vs.etaDays;
   totals.wallet_point = account?.point ?? null;
   totals.wallet_eur = account?.wallet_eur ?? null;
   const lastPull = db.prepare('SELECT * FROM pull_runs ORDER BY id DESC LIMIT 1').get();
@@ -159,7 +256,7 @@ app.get('/api/overview', (req, res) => {
   const planned = db.prepare('SELECT * FROM models WHERE planned=1 ORDER BY rowid DESC').all();
   res.json({
     handle: getSetting('handle', '@you'),
-    models, totals, account, count: models.length, lastPull, openTodos, planned, alerts: computeAlerts(models),
+    models, totals, account, count: models.length, lastPull, openTodos, planned,
     settings: {
       schedule_time: getSetting('schedule_time', '03:00'),
       schedule_enabled: getSetting('schedule_enabled', '0') === '1',
@@ -169,6 +266,12 @@ app.get('/api/overview', (req, res) => {
   });
 });
 
+// Schlanke Teilabfragen (Aufgaben, Druckprofile) - damit das Frontend nicht fuer jede Kleinigkeit das ganze Modell-Detail laedt.
+const modelTodos = id => db.prepare('SELECT t.*, m.title AS model_title FROM todos t LEFT JOIN models m ON m.design_id=t.design_id WHERE t.design_id=? ORDER BY t.done, t.priority DESC, t.id').all(id);
+const modelInstances = id => db.prepare('SELECT * FROM instances WHERE design_id=? ORDER BY is_default DESC, download_count DESC').all(id)
+  .map(x => ({ ...x, rating_avg: x.rating_count ? +(x.rating_score_total / x.rating_count).toFixed(2) : null, print_min: x.prediction ? Math.round(x.prediction / 60) : null }));
+app.get('/api/model/:id/todos', (req, res) => res.json(modelTodos(req.params.id)));
+app.get('/api/model/:id/instances', (req, res) => res.json(modelInstances(req.params.id)));
 app.get('/api/model/:id', (req, res) => {
   const id = req.params.id;
   const model = db.prepare('SELECT * FROM models WHERE design_id = ?').get(id);
@@ -184,15 +287,11 @@ app.get('/api/model/:id', (req, res) => {
   const events = db.prepare('SELECT * FROM events WHERE design_id=? ORDER BY date DESC, id DESC').all(id);
   const images = db.prepare(`SELECT * FROM images WHERE design_id=?
       AND (url LIKE '%/design/%' OR url LIKE '%/instance/%') ORDER BY position`).all(id);
-  const todos = db.prepare('SELECT * FROM todos WHERE design_id=? ORDER BY done, priority DESC, id').all(id);
-  const instances = db.prepare('SELECT * FROM instances WHERE design_id=? ORDER BY is_default DESC, download_count DESC').all(id)
-    .map(x => ({ ...x, rating_avg: x.rating_count ? +(x.rating_score_total / x.rating_count).toFixed(2) : null,
-      print_min: x.prediction ? Math.round(x.prediction / 60) : null }));
-  const crmOrders = db.prepare(`SELECT o.*, (o.qty*o.unit_price) amount, c.name contact_name, c.id contact_id
-    FROM orders o JOIN contacts c ON c.id=o.contact_id WHERE o.design_id=? ORDER BY o.order_date DESC`).all(id);
-  const crmProjects = db.prepare(`SELECT p.id, p.title, p.stage, p.price, c.name contact_name, c.id contact_id
-    FROM projects p JOIN contacts c ON c.id=p.contact_id WHERE p.design_id=? ORDER BY p.id DESC`).all(id);
-  res.json({ model: { ...model, tags: model.tags ? JSON.parse(model.tags) : [] }, snaps, daily, traffic, events, images, todos, instances, crmOrders, crmProjects });
+  const todos = modelTodos(id);
+  const instances = modelInstances(id);
+  const crmProjects = db.prepare(`SELECT p.id, p.title, p.stage, p.price, COALESCE(c.name, 'Eigenprojekt') contact_name, c.id contact_id
+    FROM projects p LEFT JOIN contacts c ON c.id=p.contact_id WHERE p.design_id=? ORDER BY p.id DESC`).all(id);
+  res.json({ model: { ...model, tags: model.tags ? JSON.parse(model.tags) : [] }, snaps, daily, traffic, events, images, todos, instances, crmProjects });
 });
 
 // Vergleichs-Zeitreihen. Query: ids=a,b metric=view granularity=day|week|month
@@ -231,14 +330,9 @@ app.get('/api/timeseries', (req, res) => {
 
   // Gruppen-Modus: eine aggregierte Linie je Kategorie/Tag/eigener Gruppe.
   if (group) {
-    const all = db.prepare('SELECT design_id, category, group_label, tags FROM models').all();
     const map = {};
-    for (const m of all) {
-      let keys;
-      if (group === 'tag') keys = m.tags ? JSON.parse(m.tags) : [];
-      else keys = [(group === 'group' ? m.group_label : m.category) || '—'];
-      for (const k of (keys.length ? keys : ['—'])) (map[k] = map[k] || []).push(m.design_id);
-    }
+    for (const m of db.prepare('SELECT design_id, category, group_label, tags FROM models').all())
+      for (const k of groupKeysOf(m, group)) (map[k] = map[k] || []).push(m.design_id);
     // groesste Gruppen zuerst, auf 12 begrenzen
     const series = Object.entries(map)
       .map(([k, mids]) => ({ id: k, title: `${k} (${mids.length})`, count: mids.length, points: seriesFor(mids) }))
@@ -275,8 +369,10 @@ app.put('/api/events/:id', (req, res) => {
   res.json(db.prepare('SELECT * FROM events WHERE id=?').get(req.params.id));
 });
 app.delete('/api/events/:id', (req, res) => {
+  const ev = db.prepare('SELECT * FROM events WHERE id=?').get(req.params.id);
+  const trash_id = ev ? trashPut('event', ev.title || ev.type || 'Änderung', addRows(newAcc(), 'events', [ev])) : null;
   db.prepare('DELETE FROM events WHERE id=?').run(req.params.id);
-  res.json({ ok: true });
+  res.json({ ok: true, trash_id });
 });
 
 // ---- Alerts (aus Momentum + Zielen) ---------------------------------------
@@ -288,8 +384,12 @@ function computeAlerts(models) {
       out.push({ type: 'hot', design_id: m.design_id, title: m.title, text: `läuft heiß: Views +${m.v_trend}% ggü. Vorwoche` });
     if (m.v_trend != null && m.v_trend <= -40 && m.v30 >= 200)
       out.push({ type: 'cool', design_id: m.design_id, title: m.title, text: `kühlt ab: Views ${m.v_trend}% ggü. Vorwoche` });
-    if (age > 60 && m.dl30 === 0 && (m.download || 0) > 0)
-      out.push({ type: 'stall', design_id: m.design_id, title: m.title, text: 'keine Downloads in 30 Tagen' });
+    // Stillstand: 0 Downloads in 30 Tagen, obwohl das Modell sonst regelmaessig geladen wird. Statt fester Schwelle
+    // zaehlt die Erwartung aus dem Lebensdurchschnitt: Alarm nur, wenn eine Null dabei unwahrscheinlich ist
+    // (Poisson: P(0) = e^-erwartet < 10 % <=> erwartet >= 2,3 Downloads je 30 Tage). Sonst ist die Null normales Rauschen.
+    const expected30 = age > 0 ? ((m.download || 0) / age) * 30 : 0;
+    if (age > 60 && m.dl30 === 0 && expected30 >= 2.3)
+      out.push({ type: 'stall', design_id: m.design_id, title: m.title, text: `keine Downloads in 30 Tagen (üblich: ~${expected30.toFixed(1).replace('.', ',')} je 30 Tage)` });
     if (m.goal_download && m.download != null) {
       const p = m.download / m.goal_download;
       if (p >= 1) out.push({ type: 'goal', design_id: m.design_id, title: m.title, text: `Ziel erreicht: ${m.download}/${m.goal_download} DL` });
@@ -299,7 +399,6 @@ function computeAlerts(models) {
   const rank = { hot: 0, goal: 1, cool: 2, stall: 3, goal_near: 4 };
   return out.sort((a, b) => (rank[a.type] ?? 9) - (rank[b.type] ?? 9));
 }
-app.get('/api/analytics/alerts', (req, res) => res.json(computeAlerts(attachMomentum(modelsWithKpis()))));
 
 // ---- Notizen / Ziele / Gruppe je Modell -----------------------------------
 app.put('/api/model/:id/notes', (req, res) => {
@@ -317,7 +416,7 @@ app.put('/api/model/:id/status', (req, res) => {
   res.json({ ok: true });
 });
 
-// Titel / Beschreibung / Tags bearbeiten (v.a. fuer geplante Produkte —
+// Titel / Beschreibung / Tags bearbeiten (v.a. fuer geplante Modelle —
 // bei echten werden Beschreibung/Tags beim naechsten Pull von MakerWorld ueberschrieben).
 app.put('/api/model/:id/meta', (req, res) => {
   const { title, description, tags } = req.body || {};
@@ -333,7 +432,7 @@ app.put('/api/model/:id/meta', (req, res) => {
   res.json({ ok: true });
 });
 
-// ---- Geplante Produkte (noch nicht auf MakerWorld) ------------------------
+// ---- Geplante Modelle (noch nicht auf MakerWorld) ------------------------
 app.post('/api/products/plan', (req, res) => {
   const { title, status, group_label, notes } = req.body || {};
   if (!title || !title.trim()) return res.status(400).json({ error: 'Titel fehlt' });
@@ -343,17 +442,22 @@ app.post('/api/products/plan', (req, res) => {
     .run(id, title.trim(), ['idee','arbeit'].includes(status) ? status : 'idee', group_label || null, notes || null, nowIso(), nowIso());
   res.json(db.prepare('SELECT * FROM models WHERE design_id=?').get(id));
 });
-// nur geplante Produkte loeschbar (schuetzt echte Daten)
+// nur geplante Modelle loeschbar (schuetzt echte Daten)
 app.delete('/api/products/:id', (req, res) => {
   const m = db.prepare('SELECT planned FROM models WHERE design_id=?').get(req.params.id);
   if (!m) return res.status(404).json({ error: 'nicht gefunden' });
-  if (!m.planned) return res.status(400).json({ error: 'nur geplante Produkte löschbar' });
+  if (!m.planned) return res.status(400).json({ error: 'nur geplante Modelle löschbar' });
+  const acc = newAcc();
+  addRows(acc, 'models', rowsOf('models', 'design_id=?', req.params.id));
+  addRows(acc, 'todos', rowsOf('todos', 'design_id=?', req.params.id));
+  addRows(acc, 'events', rowsOf('events', 'design_id=?', req.params.id));
+  const trash_id = trashPut('model', rowsOf('models', 'design_id=?', req.params.id)[0]?.title || 'Geplantes Modell', acc);
   db.transaction(() => {
     db.prepare('DELETE FROM todos WHERE design_id=?').run(req.params.id);
     db.prepare('DELETE FROM events WHERE design_id=?').run(req.params.id);
     db.prepare('DELETE FROM models WHERE design_id=?').run(req.params.id);
   })();
-  res.json({ ok: true });
+  res.json({ ok: true, trash_id });
 });
 
 // CTR-Wirkung von Titelbild-/Titel-Aenderungen: Vorher/Nachher-Fenster.
@@ -383,19 +487,12 @@ app.post('/api/views', (req, res) => {
   const r = db.prepare('INSERT INTO views(name,config,created_at) VALUES(?,?,?)').run(name, JSON.stringify(config || {}), nowIso());
   res.json(db.prepare('SELECT * FROM views WHERE id=?').get(r.lastInsertRowid));
 });
-app.delete('/api/views/:id', (req, res) => { db.prepare('DELETE FROM views WHERE id=?').run(req.params.id); res.json({ ok: true }); });
-
-// ---- Portfolio-Prognose (Basis: letzte 30 Tage) ---------------------------
-app.get('/api/analytics/forecast', (req, res) => {
-  const rate = eurRate();
-  const models = attachMomentum(modelsWithKpis());
-  const dl30 = models.reduce((s, m) => s + (m.dl30 || 0), 0);
-  const v30 = models.reduce((s, m) => s + (m.v30 || 0), 0);
-  const pts30 = models.reduce((s, m) => s + (m.pts30 || 0), 0);
-  const proj = base => ({ d30: Math.round(base), d90: Math.round(base * 3) });
-  res.json({ basis: 'letzte 30 Tage', downloads: proj(dl30), views: proj(v30), points: proj(pts30),
-    euro: { d30: +((pts30) * rate).toFixed(2), d90: +((pts30 * 3) * rate).toFixed(2) } });
+app.delete('/api/views/:id', (req, res) => {
+  const v = db.prepare('SELECT * FROM views WHERE id=?').get(req.params.id);
+  const trash_id = v ? trashPut('view', v.name, addRows(newAcc(), 'views', [v])) : null;
+  db.prepare('DELETE FROM views WHERE id=?').run(req.params.id); res.json({ ok: true, trash_id });
 });
+
 app.put('/api/model/:id/goals', (req, res) => {
   const { goal_download, goal_view, goal_point, group_label } = req.body || {};
   db.prepare('UPDATE models SET goal_download=?,goal_view=?,goal_point=?,group_label=? WHERE design_id=?')
@@ -432,27 +529,34 @@ app.put('/api/todos/:id', (req, res) => {
   db.prepare('UPDATE todos SET title=?,done=?,priority=?,due_date=?,done_at=? WHERE id=?').run(
     b.title ?? cur.title, done, b.priority ?? cur.priority, b.due_date ?? cur.due_date,
     done && !cur.done ? nowIso() : (done ? cur.done_at : null), req.params.id);
+  // Ausliefer-Aufgabe abgehakt -> Projekt in die Stufe "ausgeliefert" (nur wenn beglichen).
+  if (done && !cur.done && cur.project_id && /^Ausliefern:/.test(cur.title || '')) {
+    const pr = db.prepare('SELECT * FROM projects WHERE id=?').get(cur.project_id);
+    const settled = pr && (!!pr.paid || pr.margin_tier === 'kostenlos' || (pr.price != null && pr.price <= 0));
+    if (pr && settled && pr.stage !== 'ausgeliefert')
+      db.prepare('UPDATE projects SET stage=?, close_date=COALESCE(close_date,?) WHERE id=?')
+        .run('ausgeliefert', new Date().toISOString().slice(0, 10), cur.project_id);
+  }
   res.json(db.prepare('SELECT * FROM todos WHERE id=?').get(req.params.id));
 });
-app.delete('/api/todos/:id', (req, res) => { db.prepare('DELETE FROM todos WHERE id=?').run(req.params.id); res.json({ ok: true }); });
+app.delete('/api/todos/:id', (req, res) => {
+  const t = db.prepare('SELECT * FROM todos WHERE id=?').get(req.params.id);
+  const trash_id = t ? trashPut('todo', t.title, addRows(newAcc(), 'todos', [t])) : null;
+  db.prepare('DELETE FROM todos WHERE id=?').run(req.params.id); res.json({ ok: true, trash_id });
+});
+
+// ---- Papierkorb ---------------------------------------------------------------------------
+app.get('/api/trash', (req, res) => { purgeOld(); res.json(trashList()); });
+app.post('/api/trash/:id/restore', (req, res) => {
+  try { const r = trashRestore(+req.params.id); if (!r) return res.status(404).json({ error: 'Nicht (mehr) im Papierkorb.' }); res.json({ ok: true, ...r }); }
+  catch (e) { console.log('[trash] Wiederherstellen fehlgeschlagen:', e.message); res.status(500).json({ error: 'Wiederherstellen fehlgeschlagen: ' + e.message }); }
+});
+app.delete('/api/trash/:id', (req, res) => res.json({ ok: trashPurge(+req.params.id) }));
 
 // ---- Auswertung nach Gruppe/Kategorie/Tag ---------------------------------
 app.get('/api/analytics/groups', (req, res) => {
-  const by = String(req.query.by || 'category');
-  const models = attachMomentum(modelsWithKpis());
-  const buckets = {};
-  const add = (key, m) => {
-    key = key || '—';
-    const b = buckets[key] || (buckets[key] = { key, count: 0, view: 0, impression: 0, download: 0, print: 0, collect: 0, like: 0, point: 0, boost: 0, dl30: 0, v30: 0 });
-    b.count++; for (const k of ['view','impression','download','print','collect','like','point','boost','dl30','v30']) b[k] += (m[k] || 0);
-  };
-  for (const m of models) {
-    if (by === 'tag') { const tags = m.tags ? JSON.parse(m.tags) : []; if (!tags.length) add('—', m); else for (const t of tags) add(t, m); }
-    else add(by === 'group' ? m.group_label : m.category, m);
-  }
-  const rows = Object.values(buckets).map(b => ({ ...b, ctr: b.impression ? +((b.view / b.impression) * 100).toFixed(2) : null }))
-    .sort((a, b) => b.download - a.download);
-  res.json({ by, rows });
+  const by = ['tag', 'group', 'category'].includes(req.query.by) ? req.query.by : 'category';
+  res.json({ by, rows: aggregateGroups(attachMomentum(modelsWithKpis()), by) });
 });
 
 // ---- Punkte-Oekonomie -----------------------------------------------------
@@ -476,57 +580,18 @@ app.get('/api/analytics/account', (req, res) => {
   res.json({ history: rows, latest: rows[rows.length - 1] || null, rate: eurRate() });
 });
 
-// ---- Browser-Ingest (Daten aus dem eingeloggten Tab via Formular-POST) -----
-let lastIngest = null;
-async function ingestPayload(payload, mode) {
-  const models = Array.isArray(payload?.models) ? payload.models : [];
-  const capturedAt = nowIso();
-  const { runId } = startRun(mode);
-  let ok = 0, failed = 0; const lines = [];
-  if (payload?.handle) setSetting('handle', payload.handle.startsWith('@') ? payload.handle : '@' + payload.handle);
-  for (const m of models) {
-    try { const r = await writeModel({ id: String(m.id), pp: m.pp, detail: m.detail || {}, capturedAt }); ok++;
-      lines.push(`${r.title} — ${r.days} Tage, ${r.tags} Tags, ${r.images} Bilder`); }
-    catch (e) { failed++; lines.push(`FEHLER ${m.id}: ${e.message}`); }
-  }
-  finishRun(runId, { ok, failed, log: lines.join('\n'), status: 'ok' });
-  lastIngest = { at: capturedAt, ok, failed };
-  return { ok, failed, count: models.length };
-}
-
-// erlaubt (per CSP form-action) den POST aus dem MakerWorld-Tab
-app.post('/api/ingest', async (req, res) => {
-  const isForm = typeof req.body?.payload === 'string';
-  let payload;
-  try { payload = isForm ? JSON.parse(req.body.payload) : req.body; }
-  catch { return res.status(400).send('payload nicht lesbar'); }
-  try {
-    const r = await ingestPayload(payload, isForm ? 'browser' : 'api');
-    if (isForm) {
-      // Dank Formular-Navigation ist der Tab jetzt auf localhost – zurück zum Dashboard.
-      return res.send(`<!doctype html><meta charset=utf-8>
-        <title>Import ok</title>
-        <style>body{font:16px system-ui;background:#0e1116;color:#e6edf3;display:grid;place-items:center;height:100vh;margin:0}
-        .c{text-align:center}.b{background:#0b8457;color:#fff;padding:12px 22px;border-radius:10px;text-decoration:none;font-weight:600;display:inline-block;margin-top:16px}</style>
-        <div class=c><h1>✓ ${r.ok} Modelle importiert</h1>
-        <p>${r.failed ? r.failed + ' übersprungen. ' : ''}Du kannst das MakerWorld-Tab wieder schließen.</p>
-        <a class=b href="/">Zum Dashboard →</a></div>`);
-    }
-    res.json({ ok: true, ...r });
-  } catch (e) {
-    if (isForm) return res.status(500).send('Fehler: ' + e.message);
-    res.status(500).json({ error: e.message });
-  }
-});
-app.get('/api/ingest/status', (req, res) => res.json({ lastIngest,
-  lastRun: db.prepare('SELECT * FROM pull_runs ORDER BY id DESC LIMIT 1').get() }));
-
-// ---- Pull / Login / Import / Settings -------------------------------------
+// ---- Pull / Login / Settings -------------------------------------
 app.post('/api/pull/start', async (req, res) => res.json(await startPull('manual')));
 app.get('/api/pull/status', (req, res) => res.json({
   ...pullState,
   lastRun: db.prepare('SELECT * FROM pull_runs ORDER BY id DESC LIMIT 1').get()
 }));
+app.post('/api/pull/cancel', async (req, res) => {
+  if (!pullState.running) return res.json({ ok: false, reason: 'Es laeuft kein Pull.' });
+  pushLog('Abbruch angefordert ...');
+  try { const { abortPull } = await import('./scraper.js'); await abortPull(); } catch (e) { return res.status(500).json({ error: e.message }); }
+  res.json({ ok: true });
+});
 
 // Status aus dem gespeicherten letzten Login (kein headless-Check – den blockt
 // Cloudflare). Mit ?deep=1 kann optional trotzdem live geprueft werden.
@@ -562,11 +627,6 @@ app.post('/api/login/start', async (req, res) => {
   res.json({ started: true });
 });
 app.get('/api/login/progress', (req, res) => res.json(loginState));
-
-app.post('/api/import', (req, res) => {
-  try { res.json({ ok: true, ...importExport(req.body?.dir || undefined) }); }
-  catch (e) { res.status(500).json({ error: e.message }); }
-});
 
 app.get('/api/settings', (req, res) => res.json({
   schedule_time: getSetting('schedule_time', '03:00'),
@@ -636,6 +696,42 @@ function rescheduleWeekly() {
 }
 
 // ---- statische Dateien ----------------------------------------------------
+// ---- Systemstatus (Pull, Backup, Speicher) --------------------------------
+function memAvailableMb() {
+  try { const m = fs.readFileSync(process.env.MEMINFO_FILE || '/proc/meminfo', 'utf8').match(/MemAvailable:\s+(\d+)/); return m ? Math.round(+m[1] / 1024) : null; }
+  catch { return null; }   // nicht Linux (Entwicklung auf dem Mac)
+}
+function healthData() {
+  const sizeOf = f => { try { return fs.statSync(f).size; } catch { return 0; } };
+  const dbFile = path.join(DATA_DIR, 'makerworld.db');
+  const dbBytes = sizeOf(dbFile) + sizeOf(dbFile + '-wal');
+  let diskFreeGb = null;
+  try { const st = fs.statfsSync(DATA_DIR); diskFreeGb = +((st.bavail * st.bsize) / 1e9).toFixed(1); } catch {}
+  const lastRun = db.prepare('SELECT id,started_at,finished_at,status,mode,models_ok,models_failed FROM pull_runs ORDER BY id DESC LIMIT 1').get() || null;
+  const lastOk = db.prepare("SELECT finished_at FROM pull_runs WHERE status='ok' ORDER BY id DESC LIMIT 1").get();
+  const pullAgeH = lastOk?.finished_at ? +((Date.now() - Date.parse(lastOk.finished_at)) / 3600000).toFixed(1) : null;
+  const backupDir = process.env.BACKUP_DIR || path.join(os.homedir(), 'backups', 'makerworld');
+  let backup = null;
+  try {
+    const files = fs.readdirSync(backupDir).filter(f => /^makerworld-.*\.db\.gz$/.test(f)).sort();
+    if (files.length) { const f = files[files.length - 1], st = fs.statSync(path.join(backupDir, f));
+      backup = { file: f, at: st.mtime.toISOString(), ageH: +((Date.now() - st.mtimeMs) / 3600000).toFixed(1), count: files.length, bytes: st.size }; }
+  } catch {}
+  const memMb = memAvailableMb();
+  const issues = [];
+  if (lastRun?.status === 'error') issues.push({ level: 'error', text: 'Der letzte Pull ist fehlgeschlagen — Details unter „Daten & Pull".' });
+  else if (lastRun?.status === 'running' && !pullState.running) issues.push({ level: 'error', text: 'Ein Pull steht auf „läuft", obwohl keiner aktiv ist (Neustart/Absturz).' });
+  if (pullAgeH == null) issues.push({ level: 'warn', text: 'Noch kein erfolgreicher Pull vorhanden.' });
+  else if (pullAgeH > 36) issues.push({ level: 'error', text: `Der letzte erfolgreiche Pull ist ${Math.round(pullAgeH)} Stunden her — die Zahlen sind veraltet.` });
+  if (!backup) issues.push({ level: 'warn', text: 'Kein Backup gefunden.' });
+  else if (backup.ageH > 36) issues.push({ level: 'warn', text: `Das letzte Backup ist ${Math.round(backup.ageH)} Stunden alt.` });
+  if (diskFreeGb != null && diskFreeGb < 5) issues.push({ level: 'error', text: `Nur noch ${diskFreeGb} GB Speicherplatz frei.` });
+  if (dbBytes > 1e9) issues.push({ level: 'warn', text: `Die Datenbank ist ${(dbBytes / 1e9).toFixed(1)} GB groß (erwartet: wenige MB).` });
+  if (memMb != null && memMb < 300) issues.push({ level: 'warn', text: `Wenig freier Arbeitsspeicher (${memMb} MB).` });
+  return { dbBytes, diskFreeGb, memAvailableMb: memMb, uptimeH: +(process.uptime() / 3600).toFixed(1), lastRun, pullAgeH, backup, pullRunning: pullState.running, issues };
+}
+app.get('/api/health', (req, res) => res.json(healthData()));
+
 // ---- Heute-Dashboard (handlungsorientiert) --------------------------------
 function todayData() {
   const t = new Date().toISOString().slice(0, 10);
@@ -651,7 +747,7 @@ function todayData() {
     WHERE p.stage='fertig' AND p.paid=0 AND COALESCE(p.margin_tier,'') != 'kostenlos'`).all();
   const recentChanges = db.prepare(`SELECT e.*, m.title model_title FROM events e LEFT JOIN models m ON m.design_id=e.design_id
     WHERE e.created_at >= datetime('now','-3 day') ORDER BY e.id DESC LIMIT 15`).all();
-  return { date: t, dueTodos, openPayments, alerts, recentChanges,
+  return { date: t, dueTodos, openPayments, alerts, recentChanges, issues: healthData().issues,
     counts: { due: dueTodos.filter(x => x.overdue).length, todos: dueTodos.length, payments: openPayments.length, alerts: alerts.length } };
 }
 app.get('/api/today', (req, res) => res.json(todayData()));
@@ -659,7 +755,7 @@ app.get('/api/today', (req, res) => res.json(todayData()));
 // ---- Digest + Push --------------------------------------------------------
 function digestText() {
   const d = todayData();
-  const L = [`MakerWorld Analytics — ${d.date}`];
+  const L = [`MakerWorld Analytics — ${d.date.split('-').reverse().join('.')}`];
   if (d.openPayments.length) L.push(`\nOffene Zahlungen (${d.openPayments.length}): ` + d.openPayments.map(p => `${p.contact_name}: ${p.title}`).join(', '));
   const overdue = d.dueTodos.filter(x => x.overdue);
   if (overdue.length) L.push(`\nÜberfällige Aufgaben (${overdue.length}): ` + overdue.slice(0, 6).map(t => t.title).join(', '));
@@ -710,9 +806,9 @@ async function checkMilestones() {
     msgs.push(`${c.title}: 0 Downloads in 7 Tagen (vorher ${c.d30} in 30T)`);
   // Gutschein-Schwellen (524 Punkte = 40 €)
   const acc = db.prepare('SELECT point FROM account_snapshots ORDER BY id DESC LIMIT 1').get();
-  if (acc) { const reached = Math.floor((acc.point || 0) / 524);
-    for (let k = 1; k <= reached; k++) if (recordMilestone(null, 'voucher', k * 524, `${k * 524} Punkte`))
-      msgs.push(`${deNum(k * 524)} Punkte erreicht — ${k}× 40 € Gutschein möglich`); }
+  if (acc) { const reached = Math.floor((acc.point || 0) / VOUCHER_POINTS);
+    for (let k = 1; k <= reached; k++) if (recordMilestone(null, 'voucher', k * VOUCHER_POINTS, `${k * VOUCHER_POINTS} Punkte`))
+      msgs.push(`${deNum(k * VOUCHER_POINTS)} Punkte erreicht — ${k}× ${VOUCHER_EUR} € Gutschein möglich`); }
   if (init) { setSetting('milestones_init', '1'); return []; }
   if (msgs.length) await pushNotify('MakerWorld Meilenstein', msgs.join('\n'));
   return msgs;
@@ -723,7 +819,7 @@ app.post('/api/milestones/check', async (req, res) => res.json({ new: await chec
 // ---- Insights (automatische Erkenntnisse) ---------------------------------
 function buildInsights() {
   const rate = eurRate();
-  const models = attachMomentum(modelsWithKpis()).filter(m => !m.planned);
+  const models = attachForecast(attachMomentum(modelsWithKpis())).filter(m => !m.planned);
   const ins = [];
   const byDl30 = [...models].sort((a, b) => (b.dl30 || 0) - (a.dl30 || 0));
   if (byDl30[0] && byDl30[0].dl30 > 0) ins.push({ kind: 'mover', title: 'Zugpferd (30 T)',
@@ -739,21 +835,16 @@ function buildInsights() {
     text: `${opp.title}: ${deNum(opp.impression)} Impressionen, aber nur ${ctrOf(opp).toFixed(1)}% CTR — Titelbild/Titel testen`, design_id: opp.design_id });
   const earner = [...models].sort((a, b) => (b.earned || 0) - (a.earned || 0))[0];
   if (earner && earner.earned > 0) ins.push({ kind: 'earner', title: 'Top-Verdiener',
-    text: `${earner.title}: ${earner.earned.toFixed(2)} € (Lifetime)`, design_id: earner.design_id });
+    text: `${earner.title}: ${earner.earned.toFixed(2)} € (gesamt)`, design_id: earner.design_id });
   // Gutschein-ETA
   const acc = db.prepare('SELECT point FROM account_snapshots ORDER BY id DESC LIMIT 1').get();
-  const pts30 = models.reduce((s, m) => s + (m.pts30 || 0), 0);
-  if (acc) { const toNext = 524 - ((acc.point || 0) % 524); const perDay = pts30 / 30;
-    const eta = perDay > 0 ? Math.ceil(toNext / perDay) : null;
+  if (acc) { const v = voucherStatus(acc.point, models.reduce((s, m) => s + (m.proj_pts30 || 0), 0) / 30);
     ins.push({ kind: 'voucher', title: 'Nächster Gutschein',
-      text: `Noch ${deNum(Math.round(toNext))} Punkte bis 40 €` + (eta ? ` — bei ${perDay.toFixed(1)} P/Tag in ~${eta} Tagen` : '') });
+      text: `Noch ${deNum(v.remaining)} Punkte bis ${VOUCHER_EUR} €` + (v.etaDays ? ` — bei ~${v.perDay.toFixed(1)} P/Tag (Trend) in ~${v.etaDays} Tagen` : '') });
   }
-  // Tag-Tipp
-  const tagMap = {};
-  for (const m of models) { const tags = m.tags ? JSON.parse(m.tags) : [];
-    for (const tg of tags) { const e = tagMap[tg] || (tagMap[tg] = { tag: tg, n: 0, v: 0 }); e.n++; e.v += m.view || 0; } }
-  const tags = Object.values(tagMap).filter(t => t.n >= 2).map(t => ({ ...t, avg: t.v / t.n })).sort((a, b) => b.avg - a.avg);
-  if (tags.length >= 2) ins.push({ kind: 'tag', title: 'Stärkster Tag',
+  // Bester Hashtag (Durchschnitt Views je Modell, mind. 2 Modelle)
+  const tags = aggregateGroups(models, 'tag').filter(t => t.key !== '—' && t.count >= 2).map(t => ({ tag: t.key, n: t.count, avg: t.view / t.count })).sort((a, b) => b.avg - a.avg);
+  if (tags.length >= 2) ins.push({ kind: 'tag', title: 'Bester Hashtag',
     text: `„${tags[0].tag}" bringt im Schnitt ${deNum(Math.round(tags[0].avg))} Views/Modell (${tags[0].n}×)` });
   return ins;
 }
@@ -787,13 +878,14 @@ app.get('/api/analytics/change-impact', (req, res) => {
 
 // ---- Globale Suche --------------------------------------------------------
 app.get('/api/search', (req, res) => {
-  const q = '%' + String(req.query.q || '').trim() + '%';
-  if (q.length < 3) return res.json({ models: [], contacts: [], projects: [] });
+  const raw = String(req.query.q || '').trim();
+  if (raw.length < 3) return res.json({ models: [], contacts: [], projects: [] });
+  const q = '%' + raw.replace(/[\\%_]/g, '\\$&') + '%';   // %, _ und \ im Suchtext wie normale Zeichen behandeln
   res.json({
-    models: db.prepare("SELECT design_id, title FROM models WHERE COALESCE(planned,0)=0 AND title LIKE ? LIMIT 8").all(q),
-    contacts: db.prepare('SELECT id, name, source FROM contacts WHERE name LIKE ? OR mw_handle LIKE ? OR email LIKE ? LIMIT 8').all(q, q, q),
-    projects: db.prepare(`SELECT p.id, p.title, c.name contact_name FROM projects p JOIN contacts c ON c.id=p.contact_id
-      WHERE p.title LIKE ? LIMIT 8`).all(q)
+    models: db.prepare("SELECT design_id, title FROM models WHERE COALESCE(planned,0)=0 AND title LIKE ? ESCAPE '\\' LIMIT 8").all(q),
+    contacts: db.prepare(`SELECT id, name, source FROM contacts WHERE name LIKE ? ESCAPE '\\' OR mw_handle LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' LIMIT 8`).all(q, q, q),
+    projects: db.prepare(`SELECT p.id, p.title, COALESCE(c.name, 'Eigenprojekt') contact_name FROM projects p LEFT JOIN contacts c ON c.id=p.contact_id
+      WHERE p.title LIKE ? ESCAPE '\\' LIMIT 8`).all(q)
   });
 });
 
@@ -840,18 +932,6 @@ app.get('/api/analytics/points-matrix', (req, res) => {
   });
 });
 
-// ---- Tag-Empfehlungen (welche Tags bringen Reichweite) --------------------
-app.get('/api/analytics/tag-perf', (req, res) => {
-  const rows = attachMomentum(modelsWithKpis());
-  const map = {};
-  for (const m of rows) { const tags = m.tags ? JSON.parse(m.tags) : [];
-    for (const tg of tags) { const e = map[tg] || (map[tg] = { tag: tg, models: 0, views: 0, downloads: 0, points: 0 });
-      e.models++; e.views += m.view || 0; e.downloads += m.download || 0; e.points += m.point || 0; } }
-  const list = Object.values(map).map(e => ({ ...e, viewsPerModel: Math.round(e.views / e.models), dlPerModel: +(e.downloads / e.models).toFixed(1) }))
-    .sort((a, b) => b.viewsPerModel - a.viewsPerModel);
-  res.json({ tags: list, modelCount: rows.length });
-});
-
 // ---- Öffentlicher Read-only-Statuslink für ein Projekt --------------------
 // (Nach außen erreichbar über den isolierten Server public.js; hier lokal fürs Testen.)
 app.get('/p/:token', (req, res) => { const r = renderStatus(req.params.token); res.status(r.code).type('html').send(r.html); });
@@ -866,7 +946,17 @@ app.use('/data/images', express.static(path.join(DATA_DIR, 'images')));
 // Kein Caching fuer die App-Dateien, damit Updates sofort ankommen (Safari cached sonst app.js/css).
 app.use('/', express.static(path.join(ROOT, 'web'), { setHeaders: res => res.setHeader('Cache-Control', 'no-cache') }));
 
+// Fehler der API als JSON (Frontend zeigt den Banner), nie Stacktraces im HTML.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  const tooBig = err.type === 'entity.too.large', bad = err.type === 'entity.parse.failed';
+  if (!tooBig && !bad) console.log('[error]', req.method, req.url, err.message);
+  res.status(tooBig ? 413 : bad ? 400 : 500).json({ error: tooBig ? 'Anfrage zu groß.' : bad ? 'Ungültige Anfrage (JSON).' : 'Interner Fehler.' });
+});
+
 const PORT = process.env.PORT || 4000;
+purgeOld();   // Papierkorb: Eintraege aelter als 30 Tage endgueltig entfernen
+closeStaleRuns('Dienst neu gestartet');   // beim Start kann kein Pull laufen
 rescheduleCron();
 rescheduleWeekly();
 app.listen(PORT, () => console.log(`MakerWorld-Analytics laeuft:  http://localhost:${PORT}`));

@@ -7,7 +7,8 @@ import fs from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(__dirname, '..');
-export const DATA_DIR = path.join(ROOT, 'data');
+// DATA_DIR per Umgebungsvariable ueberschreibbar (Tests gegen eine DB-Kopie).
+export const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(ROOT, 'data');
 export const IMAGES_DIR = path.join(DATA_DIR, 'images');
 export const DB_PATH = path.join(DATA_DIR, 'makerworld.db');
 
@@ -49,7 +50,6 @@ CREATE TABLE IF NOT EXISTS snapshots (
   point_regular  INTEGER, point_exclusive INTEGER,
   boost          INTEGER, boost_regular INTEGER, boost_exclusive INTEGER,
   ctr_pct        REAL,
-  rating_avg     REAL, rating_count INTEGER,
   like_count     INTEGER, collect_count INTEGER, comment_count INTEGER,
   UNIQUE(design_id, captured_at)
 );
@@ -108,15 +108,8 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT
 );
 
--- Rohantworten, damit nie Daten verloren gehen und Felder spaeter neu
--- ausgewertet werden koennen.
-CREATE TABLE IF NOT EXISTS raw_pulls (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  design_id   TEXT,
-  captured_at TEXT,
-  kind        TEXT,              -- analytics|detail
-  json        TEXT
-);
+-- (raw_pulls entfernt: Rohantworten wurden nie gelesen und liessen die DB auf 2,9 GB wachsen.
+--  Bestehende DBs behalten die Tabelle, bis sie per scripts/slim-db.sh geleert wird.)
 
 CREATE TABLE IF NOT EXISTS todos (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,6 +123,7 @@ CREATE TABLE IF NOT EXISTS todos (
 );
 
 CREATE INDEX IF NOT EXISTS idx_daily_design ON daily_metrics(design_id);
+CREATE INDEX IF NOT EXISTS idx_daily_date   ON daily_metrics(date);   -- Zeitfenster-Abfragen (7/30/90 Tage)
 CREATE INDEX IF NOT EXISTS idx_snap_design  ON snapshots(design_id, captured_at);
 CREATE INDEX IF NOT EXISTS idx_events_design ON events(design_id);
 -- Konto-weite Kennzahlen je Pull (Portfolio-Ebene, aus session.user).
@@ -177,19 +171,6 @@ CREATE TABLE IF NOT EXISTS projects (
   status      TEXT DEFAULT 'offen',-- offen|in_arbeit|fertig|abgebrochen
   value       REAL,
   due_date    TEXT,
-  created_at  TEXT
-);
-CREATE TABLE IF NOT EXISTS orders (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  contact_id  INTEGER NOT NULL,
-  project_id  INTEGER,
-  design_id   TEXT,
-  title       TEXT,
-  qty         INTEGER DEFAULT 1,
-  unit_price  REAL DEFAULT 0,
-  status      TEXT DEFAULT 'angefragt', -- angefragt|bestaetigt|produktion|versendet|bezahlt|storniert
-  order_date  TEXT,
-  notes       TEXT,
   created_at  TEXT
 );
 -- Teile-Katalog ("SAP" = eigene DB): Magnete, Schrauben, Metallteile ...
@@ -250,8 +231,6 @@ CREATE TABLE IF NOT EXISTS milestones (
   UNIQUE(design_id, kind, threshold)
 );
 CREATE INDEX IF NOT EXISTS idx_projects_contact ON projects(contact_id);
-CREATE INDEX IF NOT EXISTS idx_orders_contact ON orders(contact_id);
-CREATE INDEX IF NOT EXISTS idx_orders_design ON orders(design_id);
 
 -- Betriebsausgaben (Filament-Kaeufe, Drucker, Zubehoer ...)
 CREATE TABLE IF NOT EXISTS expenses (
@@ -292,7 +271,7 @@ CREATE INDEX IF NOT EXISTS idx_todos_design ON todos(design_id);
   add('goal_point', 'goal_point INTEGER');
   add('group_label', 'group_label TEXT');   // manuelle Gruppe/Typ fuer Auswertung
   add('status', 'status TEXT');              // idee|arbeit|live|update|archiv
-  add('planned', 'planned INTEGER DEFAULT 0'); // 1 = geplantes Produkt (noch nicht auf MakerWorld)
+  add('planned', 'planned INTEGER DEFAULT 0'); // 1 = geplantes Modell (noch nicht auf MakerWorld)
   add('cover_hash', 'cover_hash TEXT');         // Hash des Titelbilds fuer zuverlaessige Aenderungserkennung
   add('mw_update_time', 'mw_update_time TEXT');  // updateTime von MakerWorld = letzte Bearbeitung
   add('close_date', 'close_date TEXT');          // manuelles Abschluss-/Zieldatum (Path-Leiste)
@@ -321,6 +300,9 @@ CREATE INDEX IF NOT EXISTS idx_todos_design ON todos(design_id);
   add('file_path', 'file_path TEXT');                // Pfad relativ zu data/
   add('self', 'self INTEGER DEFAULT 0');             // 1 = Eigenprojekt (kein Kunde)
   add('priority', 'priority INTEGER DEFAULT 1');     // 0 niedrig | 1 normal | 2 hoch | 3 dringend
+  add('paid_at', 'paid_at TEXT');                    // Zahlungsdatum (YYYY-MM-DD), gesetzt beim Haken "bezahlt"
+  add('invoice_no', 'invoice_no INTEGER');           // Rechnungsnummer: je Projekt einmal vergeben und stabil
+  add('invoice_date', 'invoice_date TEXT');          // Rechnungsdatum (YYYY-MM-DD) der ersten Erstellung
 }
 // Einmalig: contact_id nullbar machen (fuer Eigenprojekte ohne Kunde). SQLite kann
 // NOT NULL nicht per ALTER entfernen -> transaktionaler Tabellen-Rebuild, dynamisch
@@ -358,18 +340,16 @@ if (getSetting('projects_contact_nullable', '0') !== '1') {
   add('contact_id', 'contact_id INTEGER');
   add('project_id', 'project_id INTEGER');
 }
-// Einmalige Migration: bestehende Bestellungen -> Projekte (Projekte = einzige Geld-Logik)
-if (getSetting('orders_migrated', '0') !== '1') {
+// Bestellwesen entfernt (Projekte sind die einzige Geld-Logik). Die leere Alt-Tabelle `orders` wird
+// aufgeraeumt; enthaelt sie wider Erwarten noch Zeilen, bleibt sie unberuehrt (kein Datenverlust).
+if (getSetting('orders_dropped_v1', '0') !== '1') {
   try {
-    const orders = db.prepare('SELECT * FROM orders').all();
-    const stageOf = st => ({ angefragt: 'anfrage', bestaetigt: 'druck', produktion: 'druck', versendet: 'fertig', bezahlt: 'fertig', storniert: 'abgebrochen' }[st] || 'anfrage');
-    const ins = db.prepare(`INSERT INTO projects(contact_id,title,design_id,stage,status,price,paid,qty,created_at)
-      VALUES(?,?,?,?,?,?,?,?,?)`);
-    for (const o of orders) ins.run(o.contact_id, o.title || 'Bestellung', o.design_id, stageOf(o.status), 'offen',
-      (o.qty || 1) * (o.unit_price || 0), o.status === 'bezahlt' ? 1 : 0, o.qty || 1, o.created_at || nowIso());
-    setSetting('orders_migrated', '1');
-    if (orders.length) console.log('[migration] ' + orders.length + ' Bestellungen -> Projekte');
-  } catch (e) { /* orders-Tabelle evtl. noch nicht da */ }
+    const has = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='orders'").get();
+    if (!has) setSetting('orders_dropped_v1', '1');
+    else if (db.prepare('SELECT COUNT(*) c FROM orders').get().c === 0) {
+      db.exec('DROP TABLE orders'); setSetting('orders_dropped_v1', '1'); console.log('[migration] leere Tabelle orders entfernt');
+    } else console.log('[migration] orders enthaelt Daten - nicht entfernt');
+  } catch (e) { console.log('[migration] orders-Bereinigung fehlgeschlagen:', e.message); }
 }
 
 // Einmalige Bereinigung: von MakerWorld automatisch erzeugte 3mf/STL-Render
@@ -382,6 +362,77 @@ if (getSetting('img_cleanup_v1', '0') !== '1') {
     db.exec(`DELETE FROM events WHERE type='other' AND title='automatisch erkannt' AND note LIKE 'Modell bearbeitet%'`);
     setSetting('img_cleanup_v1', '1');
   } catch (e) { /* Tabellen evtl. noch nicht da */ }
+}
+
+// Einmalig: Meilensteine ohne Modell (design_id NULL, z.B. Gutschein-Schwellen) wurden bei
+// jedem Pull neu angelegt, weil SQLite NULL in UNIQUE als verschieden behandelt. Duplikate
+// entfernen (aeltester Eintrag bleibt) und einen eindeutigen Index auf COALESCE(design_id,'')
+// anlegen, damit INSERT OR IGNORE auch fuer NULL greift.
+if (getSetting('milestones_dedupe_v1', '0') !== '1') {
+  try {
+    const r = db.prepare(`DELETE FROM milestones WHERE id NOT IN
+      (SELECT MIN(id) FROM milestones GROUP BY COALESCE(design_id,''), kind, threshold)`).run();
+    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS ux_milestones_key ON milestones(COALESCE(design_id,''), kind, threshold)`);
+    setSetting('milestones_dedupe_v1', '1');
+    if (r.changes) console.log('[migration] ' + r.changes + ' doppelte Meilensteine entfernt');
+  } catch (e) { console.log('[migration] Meilenstein-Bereinigung fehlgeschlagen:', e.message); }
+}
+
+// Papierkorb (siehe trash.js): geloeschte Datensaetze 30 Tage wiederherstellbar.
+db.exec(`CREATE TABLE IF NOT EXISTS trash (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind       TEXT,              -- todo|event|view|expense|payout|part|spool|item|partlink|model|project|contact
+  label      TEXT,
+  payload    TEXT,              -- JSON {rows:{tabelle:[...]}, files:[...]}
+  created_at TEXT
+);`);
+
+// Druckprotokoll: welcher Druck hat wie viel Gramm von welcher Spule abgebucht (damit "Zurueckgenommen" rueckbuchen kann).
+db.exec(`CREATE TABLE IF NOT EXISTS print_log (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id    INTEGER NOT NULL,
+  spool_id   INTEGER,
+  grams      REAL,
+  created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_printlog_item ON print_log(item_id);`);
+
+// Einmalig: Zahlungsdatum fuer bereits bezahlte Projekte naeherungsweise nachtragen
+// (Abschluss-, Deadline- oder Anlagedatum) - bisher gab es kein echtes Zahlungsdatum.
+if (getSetting('paid_at_backfill_v1', '0') !== '1') {
+  try {
+    const r = db.prepare(`UPDATE projects SET paid_at=COALESCE(close_date, due_date, substr(created_at,1,10)) WHERE paid=1 AND paid_at IS NULL`).run();
+    setSetting('paid_at_backfill_v1', '1'); if (r.changes) console.log('[migration] paid_at fuer ' + r.changes + ' bezahlte Projekte genaehert nachgetragen');
+  } catch (e) { console.log('[migration] paid_at-Nachtrag fehlgeschlagen:', e.message); }
+}
+// Einmalig: Standard-Margenstufe explizit machen. Bisher galt stillschweigend die ERSTE Stufe;
+// das bleibt so (kein Preissprung), ist jetzt aber als `default` markiert und in der UI aenderbar.
+if (getSetting('tiers_default_v1', '0') !== '1') {
+  try {
+    const raw = getSetting('calc_tiers', null);
+    if (raw) { const t = JSON.parse(raw); if (Array.isArray(t) && t.length && !t.some(x => x.default)) { t[0].default = true; setSetting('calc_tiers', JSON.stringify(t)); } }
+    setSetting('tiers_default_v1', '1');
+  } catch (e) { console.log('[migration] Standard-Marge fehlgeschlagen:', e.message); }
+}
+
+// Einmalig: Reste entfernter Features aufraeumen.
+//  - settings `bambu_*` (Druckeranbindung, wieder entfernt)
+//  - snapshots.rating_avg/rating_count (MakerWorld hat keine Modell-Bewertung, Spalten waren immer NULL;
+//    Bewertungen gibt es nur je Druckprofil in `instances`). Nur droppen, wenn wirklich leer.
+if (getSetting('cleanup_v2', '0') !== '1') {
+  try {
+    const d = db.prepare("DELETE FROM settings WHERE key LIKE 'bambu\\_%' ESCAPE '\\'").run();
+    const cols = db.prepare('PRAGMA table_info(snapshots)').all().map(c => c.name);
+    if (cols.includes('rating_avg') || cols.includes('rating_count')) {
+      const used = db.prepare('SELECT COUNT(*) c FROM snapshots WHERE rating_avg IS NOT NULL OR rating_count IS NOT NULL').get().c;
+      if (used === 0) {
+        for (const c of ['rating_avg', 'rating_count']) if (cols.includes(c)) db.exec(`ALTER TABLE snapshots DROP COLUMN ${c}`);
+        console.log('[migration] snapshots.rating_* entfernt');
+      } else console.log('[migration] snapshots.rating_* enthaelt Daten - nicht entfernt');
+    }
+    if (d.changes) console.log('[migration] ' + d.changes + ' bambu_*-Settings entfernt');
+    setSetting('cleanup_v2', '1');
+  } catch (e) { console.log('[migration] cleanup_v2 fehlgeschlagen:', e.message); }
 }
 
 // -------- kleine Helfer ----------------------------------------------------

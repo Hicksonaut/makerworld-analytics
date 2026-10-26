@@ -28,10 +28,10 @@ const S = {
   snap: db.prepare(`
     INSERT INTO snapshots(design_id,captured_at,impression,view,download,print,print_total,
       collect,"like",follower,point,point_from_model,point_from_inst,point_regular,point_exclusive,
-      boost,boost_regular,boost_exclusive,ctr_pct,rating_avg,rating_count,like_count,collect_count,comment_count)
+      boost,boost_regular,boost_exclusive,ctr_pct,like_count,collect_count,comment_count)
     VALUES(@design_id,@captured_at,@impression,@view,@download,@print,@print_total,
       @collect,@like,@follower,@point,@point_from_model,@point_from_inst,@point_regular,@point_exclusive,
-      @boost,@boost_regular,@boost_exclusive,@ctr_pct,@rating_avg,@rating_count,@like_count,@collect_count,@comment_count)
+      @boost,@boost_regular,@boost_exclusive,@ctr_pct,@like_count,@collect_count,@comment_count)
     ON CONFLICT(design_id,captured_at) DO NOTHING`),
   daily: db.prepare(`
     INSERT INTO daily_metrics(design_id,date,days_since_publish,impression,view,download,print,
@@ -49,7 +49,6 @@ const S = {
       recommend=excluded.recommend,search=excluded.search,browse=excluded.browse,direct=excluded.direct,other=excluded.other`),
   img: db.prepare(`INSERT INTO images(design_id,position,url,local_path) VALUES(?,?,?,?)
     ON CONFLICT(design_id,url) DO UPDATE SET position=excluded.position,local_path=excluded.local_path`),
-  raw: db.prepare(`INSERT INTO raw_pulls(design_id,captured_at,kind,json) VALUES(?,?,?,?)`),
   cover: db.prepare('UPDATE models SET cover_image=COALESCE(cover_image,?) WHERE design_id=?'),
   instance: db.prepare(`INSERT INTO instances(design_id,instance_id,title,download_count,print_count,
       rating_count,rating_score_total,score,weight,prediction,need_ams,material_color_cnt,is_default,captured_at)
@@ -125,8 +124,8 @@ async function fetchCover(id, url) {
 }
 
 // Schreibt ein Modell. pp = pageProps der Analytics-Antwort, detail = optional
-// {title,description,tags,tagCount,likeCount,collectCount,commentCount,ratingAvg,
-//  ratingCount,instanceCount,cover,license,category,images:[url]}
+// {title,description,tags,tagCount,likeCount,collectCount,commentCount,
+//  instanceCount,cover,license,category,images:[url]}
 const normText = s => String(s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
 const stripQuery = u => String(u || '').split('?')[0];
 // Aenderungen automatisch als Event festhalten (max. 1 je Typ/Tag/Modell).
@@ -168,8 +167,8 @@ export async function writeModel({ id, pp, detail = {}, capturedAt }) {
   const oldRow = db.prepare('SELECT title,description,tags,cover_url,cover_hash,mw_update_time FROM models WHERE design_id=?').get(id);
   // Titelbild immer frisch laden + hashen (Basis fuer Aenderungserkennung).
   const coverInfo = await fetchCover(id, detail.cover);
-  S.raw.run(id, capturedAt, 'analytics', JSON.stringify(pp));
-  if (detail && detail.raw !== undefined) S.raw.run(id, capturedAt, 'detail', JSON.stringify(detail.raw || {}));
+  // Hinweis: Rohantworten werden bewusst NICHT mehr gespeichert (raw_pulls waren ~44 MB pro Pull,
+  // 2,9 GB DB nach 7 Wochen, nie gelesen). Alle genutzten Felder landen in den Fachtabellen.
 
   const info = md.designInfo || {}, sum = md.summary || {}, tr = md.trafficSource || {};
   const publish = iso((info.publishTime || '').slice(0, 10));
@@ -197,7 +196,6 @@ export async function writeModel({ id, pp, detail = {}, capturedAt }) {
       point_regular: sum.pointRegular ?? 0, point_exclusive: sum.pointExclusive ?? 0,
       boost: sum.boost ?? 0, boost_regular: sum.boostRegular ?? 0, boost_exclusive: sum.boostExclusive ?? 0,
       ctr_pct: sum.impression ? +((sum.view / sum.impression) * 100).toFixed(3) : null,
-      rating_avg: detail.ratingAvg ?? null, rating_count: detail.ratingCount ?? null,
       like_count: detail.likeCount ?? null, collect_count: detail.collectCount ?? null,
       comment_count: detail.commentCount ?? null
     });
@@ -249,7 +247,7 @@ export async function writeModel({ id, pp, detail = {}, capturedAt }) {
            tags: detail.tagCount ?? 0, images: detail.images?.length ?? 0, merged };
 }
 
-// Geplantes Produkt mit gleichem Titel in das jetzt echte Modell verschmelzen:
+// Geplantes Modell mit gleichem Titel in das jetzt echte Modell verschmelzen:
 // Notizen/Ziele/Gruppe uebernehmen, Todos/Events umhaengen, Platzhalter loeschen.
 function mergePlanned(realId, title) {
   const planned = db.prepare(

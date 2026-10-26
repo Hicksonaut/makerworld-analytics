@@ -23,6 +23,20 @@ and the data never leaves it.
 
 ## Features
 
+**Navigation & usability**
+- Ten top-level areas (*Today · Models · Analysis · Customers · Projects · Finance ·
+  Ideas & Drafts · Material & Costing · Tasks · Data & Pull*); related pages live
+  as tabs inside an area, and the last tab per area is remembered. The old
+  deep links (`#momentum`, `#leads`, …) still work.
+- Responsive: below 800 px the sidebar becomes a slide-in menu, drawers go
+  full-width, kanban columns snap while swiping.
+- Keyboard & screen-reader friendly: real links, visible focus, dialogs with a
+  focus trap, labels on every field, tooltips that explain abbreviations
+  (DL, Impr, CTR%) and the point terms.
+- **Nothing is lost by accident:** deleting a customer, project, task, expense,
+  spool, … offers an **Undo** and keeps the item (with its dependent rows and
+  files) in a **30-day trash** you can restore from under *Data & Pull*.
+
 **Analytics**
 - Portfolio KPIs: points/credits, next voucher threshold, followers, likes,
   collections, downloads, MakerWorld level.
@@ -88,16 +102,24 @@ and the data never leaves it.
   notifications (1000 downloads, next voucher, models going cold).
 
 **Data**
-- One live pull button, plus an optional scheduled daily pull (cron).
-- Everything is stored raw as well, so new fields can be re-derived later.
+- One live pull button, plus an optional scheduled daily pull (cron), with a
+  watchdog (a hung pull is aborted after 25 min), a RAM guard on small
+  machines and a failure push if you configured a push URL.
+- **System status** card (last pull, last backup, DB size, free disk/RAM) and an
+  automatic notice on *Today* when something looks wrong (stale data, failed
+  pull, missing backup).
+- Compact database: only the derived tables are stored — a year of daily pulls
+  stays in the low megabytes.
+- Daily **backup** script (`scripts/backup.sh`, SQLite online backup + integrity
+  check, 14-day rotation) with a ready-made systemd timer.
 
 | Model detail | Finances | Project calculator |
 |---|---|---|
 | ![](docs/02-model-detail.png) | ![](docs/03-finances.png) | ![](docs/04-project.png) |
 
-| Own projects (planning) | Categories |
-|---|---|
-| ![](docs/06-own-projects.png) | ![](docs/05-categories.png) |
+| Own projects (planning) | Categories | Mobile |
+|---|---|---|
+| ![](docs/06-own-projects.png) | ![](docs/05-categories.png) | ![](docs/07-mobile.png) |
 
 ---
 
@@ -148,7 +170,15 @@ sudo apt install xvfb
 ```
 
 A ready-made systemd unit is in [`deploy/makerworld-analytics.service`](deploy/makerworld-analytics.service)
-(edit the user/paths, then `systemctl enable --now`). Chrome per-machine cookie
+(edit the user/paths, then `systemctl enable --now`). It sets `OOMScoreAdjust=400`,
+so on a small, shared Pi the kernel stops *this* service first instead of your
+other apps when memory runs out; the pull itself waits while less than ~800 MB
+RAM is free (`PULL_MIN_RAM_MB`).
+
+**Backups:** copy `deploy/makerworld-backup.{service,timer}` to
+`/etc/systemd/system/`, adjust user/paths and `systemctl enable --now makerworld-backup.timer`
+(daily 04:15 → `~/backups/makerworld/`). `scripts/pull-backups-to-mac.sh` copies
+them to another machine — a backup on the same SD card is not a safety net. Chrome per-machine cookie
 encryption means you can't just copy the browser profile across machines —
 export the decrypted session on your desktop and drop it on the Pi:
 
@@ -167,10 +197,25 @@ one SQLite file under `data/` (git-ignored).
 
 ```
 server/   db.js  index.js  public.js  publicPage.js  scraper.js  ingest.js
-          crm.js  importer.js  seed-demo.js
-web/      index.html  app.js  styles.css  vendor/chart.umd.min.js
+          crm.js  trash.js  seed-demo.js
+web/      index.html  app.js  styles.css  favicon.svg  vendor/chart.umd.min.js
+scripts/  backup.sh  pull-backups-to-mac.sh
 deploy/   makerworld-analytics.service  makerworld-public.service
+          makerworld-backup.service  makerworld-backup.timer
 ```
+
+### Security model (no password, by design)
+
+The dashboard is meant for your own LAN/VPN and has **no login**. To keep other
+websites from reaching it through your browser it only answers requests whose
+`Host` is a private/local name or IP (`localhost`, RFC1918 ranges, `*.local`,
+`*.lan`, `*.ts.net`, Tailscale `100.64/10`, single-label names; extend with
+`ALLOWED_HOSTS=a.example.com,b.example.com`) and rejects state-changing
+requests that carry a foreign `Origin` (CSRF / DNS-rebinding protection). It also
+sends `X-Frame-Options: DENY` and similar headers, caps JSON bodies at 2 MB
+(only the `.3mf` upload may be larger) and never returns stack traces. **Do not
+expose port 4000 to the internet** — put a VPN (WireGuard/Tailscale) in front if
+you need remote access.
 
 The optional **public status page** runs as a second, minimal process
 (`server/public.js`, [`deploy/makerworld-public.service`](deploy/makerworld-public.service))

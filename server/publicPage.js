@@ -5,15 +5,18 @@
 // (nur Modellarbeit, kein Druck) entfällt die Druck-Stufe + der Fortschrittsbalken.
 import { db, getSetting } from './db.js';
 
-const esc = x => String(x ?? '').replace(/[<>&]/g, m => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[m]));
+const esc = x => String(x ?? '').replace(/[<>&"']/g, m => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' }[m]));
 const NOT_FOUND = '<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:oklch(0.19 0.012 260);color:oklch(0.7 0.012 260);font:15px -apple-system,BlinkMacSystemFont,sans-serif">Dieser Link ist nicht (mehr) gültig.</body>';
 
 const CHECK = '<svg width="11" height="9" viewBox="0 0 11 9" fill="none"><path d="M1 4.5L4 7.5L10 1" stroke="white" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
-// Angehaengte .3mf-Datei zu einem Token (nur Modellarbeit) — Download NUR wenn bezahlt.
+// Angehaengte .3mf-Datei zu einem Token (nur Modellarbeit) — Download NUR wenn beglichen
+// (bezahlt oder kostenlos; bei kostenlos gibt es nichts einzufordern).
 export function projectFileByToken(token) {
-  const p = db.prepare('SELECT kind, paid, file_name, file_path FROM projects WHERE share_token=?').get(token);
-  if (!p || p.kind !== 'modell' || !p.file_path || !p.paid) return null;   // gesperrt bis bezahlt
+  const p = db.prepare('SELECT kind, paid, margin_tier, price, file_name, file_path FROM projects WHERE share_token=?').get(token);
+  if (!p || p.kind !== 'modell' || !p.file_path) return null;
+  const settled = !!p.paid || p.margin_tier === 'kostenlos' || (p.price != null && p.price <= 0);
+  if (!settled) return null;   // gesperrt bis beglichen
   return { rel: p.file_path, name: p.file_name || 'modell.3mf' };
 }
 
@@ -49,8 +52,11 @@ export function renderStatus(token) {
     ? `<div class="items">${items.map(i => `<div class="item"><div>${esc(i.label || i.model_title || 'Position')}</div><div class="iqty">×${i.qty}</div></div>`).join('')}</div>` : '';
 
   // .3mf-Download (nur Modellarbeit): Datei sichtbar hochgeladen, Download erst nach Zahlung.
+  // Kostenlose Aufträge haben nichts zu bezahlen -> Download direkt freigeschaltet.
+  const price0 = p.price != null ? p.price : null;
+  const settled = !!p.paid || p.margin_tier === 'kostenlos' || (price0 != null && price0 <= 0);
   const fileHtml = (modelOnly && p.file_name)
-    ? (p.paid
+    ? (settled
       ? `<a class="dl" href="/p/${esc(token)}/file">3D-Datei herunterladen (.3mf)</a>`
       : `<div class="dl locked"><span class="lk"><svg width="12" height="12" viewBox="0 0 14 16" fill="none"><path d="M3.5 7V4.5a3.5 3.5 0 0 1 7 0V7" stroke="currentColor" stroke-width="1.6"/><rect x="1.5" y="7" width="11" height="8" rx="1.5" fill="currentColor"/></svg> Datei hochgeladen</span><span class="ls">Download nach Zahlung freigeschaltet</span></div>`)
     : '';
@@ -110,7 +116,7 @@ h1{margin:2px 0 14px;font-size:23px;line-height:1.25;font-weight:700;color:oklch
 .dl.locked .ls{font-size:11px;font-weight:400}
 </style></head><body><div class=wrap>
   <div class=card>
-    <div class=top><div class=cust>${esc(seller.name || 'Auftragsstatus')}</div><div class="badge ${paid ? 'paid' : 'open'}">${paid ? 'bezahlt' : 'offen'}</div></div>
+    <div class=top><div class=cust>${esc(seller.name || 'Auftragsstatus')}</div>${free ? '' : `<div class="badge ${paid ? 'paid' : 'open'}">${paid ? 'bezahlt' : 'offen'}</div>`}</div>
     <h1>${esc(p.title)}</h1>
     <div class=status>Status: <b>${esc(stageLabel)}</b></div>
     ${progressHtml}

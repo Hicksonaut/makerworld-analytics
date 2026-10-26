@@ -26,19 +26,49 @@ const el = (tag, attrs = {}, ...kids) => {
     else if (v != null && v !== false) n.setAttribute(k, v === true ? '' : v);
   }
   for (const c of kids.flat()) if (c != null && c !== false) n.append(c.nodeType ? c : document.createTextNode(t(String(c))));
+  // Tastatur: alles Klickbare, das kein echtes Bedienelement ist (Zeilen, Karten, Chips, Links ohne href),
+  // wird fokussierbar und reagiert auf Enter/Leertaste.
+  if (typeof attrs.onclick === 'function' && !['button', 'input', 'select', 'textarea', 'label', 'summary'].includes(tag) && !(tag === 'a' && attrs.href)) {
+    n.setAttribute('tabindex', '0');
+    if (tag !== 'tr' && tag !== 'th' && tag !== 'td' && !n.hasAttribute('role')) n.setAttribute('role', 'button');
+    n.addEventListener('keydown', e => { if (e.target === n && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); n.click(); } });
+  }
   return n;
 };
-const api = (p, opt) => fetch('/api' + p, opt).then(r => r.json());
+// Zentrale API-Funktion: Netzwerk-/Serverfehler zeigen einen Banner (sonst bleibt die Seite stumm leer).
+// 4xx mit JSON-Fehlertext wird wie bisher an den Aufrufer zurueckgegeben (z.B. „Nicht bezahlt").
+let _bannerT;
+function showBanner(msg) {
+  let b = document.getElementById('errBanner');
+  if (!b) { b = document.createElement('div'); b.id = 'errBanner'; b.className = 'errbanner'; b.addEventListener('click', () => { b.hidden = true; }); document.body.append(b); }
+  b.textContent = t(msg); b.hidden = false; clearTimeout(_bannerT); _bannerT = setTimeout(() => { b.hidden = true; }, 12000);
+}
+const api = async (p, opt) => {
+  let r;
+  try { r = await fetch('/api' + p, opt); }
+  catch (e) { showBanner('Server nicht erreichbar — Verbindung zur Pi prüfen.'); throw e; }
+  let body = null; try { body = await r.json(); } catch { /* kein JSON */ }
+  if (!r.ok) {
+    if (r.status >= 500 || !body) showBanner(`Fehler ${r.status} bei ${p}` + (body && body.error ? ': ' + body.error : ''));
+    if (body) return body;
+    throw new Error('HTTP ' + r.status + ' ' + p);
+  }
+  return body;
+};
+window.addEventListener('unhandledrejection', e => { const m = e.reason && e.reason.message ? e.reason.message : String(e.reason); if (!/HTTP \d+|Failed to fetch|Load failed/.test(m)) showBanner('Unerwarteter Fehler: ' + m); });
 const jpost = (p, body, m = 'POST') => api(p, { method: m, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 const fmt = n => n == null ? '–' : Number(n).toLocaleString(LOC());
 const fmt1 = n => n == null ? '–' : Number(n).toLocaleString(LOC(), { maximumFractionDigits: 1 });
 const eur = n => n == null ? '–' : Number(n).toLocaleString(LOC(), { style: 'currency', currency: 'EUR' });
 const rate = () => STATE.overview?.settings?.eur_per_point || (40 / 524);
-const nice = iso => iso ? new Date(iso).toLocaleString(LOC(), { dateStyle: 'short', timeStyle: 'short' }) : '–';
+const nice = iso => iso ? new Date(iso).toLocaleString(LOC(), { dateStyle: 'medium', timeStyle: 'short' }) : '–';
+// Einheitliches Datumsformat in der Anzeige: TT.MM.JJJJ (de) bzw. MM/DD/YYYY (en). Eingaben/Diagramme bleiben ISO.
+const dmy = iso => { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); if (!m) return iso ? String(iso) : '–';
+  return LANG.cur === 'en' ? `${m[2]}/${m[3]}/${m[1]}` : `${m[3]}.${m[2]}.${m[1]}`; };
 const today = () => new Date().toISOString().slice(0, 10);
 const COLORS = ['#1f5c8f','#1a7f37','#b4620a','#c1332d','#6b4fa1','#0e7490','#a3357a','#4b5563','#2563eb','#059669','#d97706','#7c3aed'];
 
-const METRICS = [['view','Views'],['impression','Impressions'],['download','Downloads'],['print','Drucke'],
+const METRICS = [['view','Views'],['impression','Impressionen'],['download','Downloads'],['print','Drucke'],
   ['collect','Gesammelt'],['like','Likes'],['follower','Follower'],['boost','Boost'],['points','Punkte']];
 const metricLabel = m => (METRICS.find(x => x[0] === m) || [m, m])[1];
 const STATUSES = [['idee','Idee'],['arbeit','In Arbeit'],['live','Live'],['update','Update geplant'],['archiv','Archiviert']];
@@ -59,6 +89,26 @@ function exportTableCsv(filename, sel = '#view table') {
 const csvBtn = (name) => el('button', { class: 'btn sm', onclick: () => exportTableCsv(name) }, 'CSV');
 
 let STATE = { overview: null };
+// Anzeigenamen der Alert-Typen (statt roher Kuerzel wie STALL/COOL).
+const ALERT_LABELS = { hot: 'Läuft heiß', cool: 'Kühlt ab', stall: 'Stillstand', goal: 'Ziel erreicht', goal_near: 'Ziel nah' };
+// Erklaerungen als Tooltip fuer Tabellenkoepfe und Kennzahlen (Kuerzel wie DL, Impr, CTR%, Punktebegriffe).
+const COL_TIPS = {
+  'Impr': 'Impressionen: wie oft das Modell in Listen und Suchergebnissen angezeigt wurde', 'Impressionen': 'Wie oft das Modell in Listen und Suchergebnissen angezeigt wurde',
+  'Views': 'Aufrufe der Modellseite', 'CTR%': 'Klickrate: Views ÷ Impressionen', 'DL': 'Downloads gesamt', 'DL30': 'Downloads in den letzten 30 Tagen',
+  'V/T': 'Views pro Tag (Ø der letzten 7 Tage)', 'Trend': 'Veränderung der Views gegenüber der Vorwoche', '30T Views': 'Tägliche Views der letzten 30 Tage (Verlauf)',
+  'Gesammelt': 'In Sammlungen anderer Nutzer gespeichert', 'Kommentare': 'Anzahl Kommentare', 'Punkte': 'Punkte, die das Modell seit Beginn eingebracht hat',
+  'Verdient': 'Punkte × Punktwert (524 Punkte = 40 €) — rechnerischer Wert, keine Auszahlung', 'Boost': 'Erhaltene Boosts', 'Release': 'Veröffentlichungsdatum auf MakerWorld',
+  'Tags': 'Anzahl der Hashtags', 'Drucke': 'Wie oft das Modell nachgedruckt wurde', 'V·7T': 'Views der letzten 7 Tage', 'V·30T': 'Views der letzten 30 Tage',
+  'V/Tag': 'Views pro Tag (Ø 7 Tage)', 'DL·7T': 'Downloads der letzten 7 Tage', 'DL·30T': 'Downloads der letzten 30 Tage', 'DL/Tag': 'Downloads pro Tag (Ø 7 Tage)',
+  'ΔDL Wo': 'Downloads: diese Woche minus Vorwoche', 'Punkte·30T': 'Punkte der letzten 30 Tage', 'Likes': 'Anzahl Likes'
+};
+const STAT_TIPS = {
+  'Kontostand': 'Aktueller Punktestand Ihres MakerWorld-Kontos (Wallet) laut letztem Pull — noch nicht eingelöst.',
+  'Punkte gesamt': 'Summe der Punkte, die alle Ihre Modelle seit Beginn der Aufzeichnung eingebracht haben.',
+  'Verdient gesamt': 'Punkte gesamt × Punktwert (aktuell 524 Punkte = 40 €). Rechnerischer Wert, keine Auszahlung.',
+  'DL · 30 T': 'Downloads in den letzten 30 Tagen', 'Punkte · 30 T': 'Punkte der letzten 30 Tage', 'CTR': 'Klickrate: Views ÷ Impressionen',
+  'Impr': 'Impressionen: wie oft das Modell angezeigt wurde', 'DL': 'Downloads gesamt', 'Gesammelt': 'In Sammlungen anderer Nutzer gespeichert'
+};
 
 // -------- Sparkline (winzige Inline-SVG) --------
 function sparkline(vals, w = 72, h = 16) {
@@ -104,26 +154,57 @@ const routes = { heute: renderHeute, overview: renderOverview, momentum: renderM
   groups: renderGroups, points: renderPoints, report: renderReport,
   contacts: renderContacts, leads: renderLeads, projekte: renderProjekte, revenue: renderRevenue, teile: renderParts,
   pipeline: renderPipeline, selbst: renderSelfProjects, druckplan: renderDruckplan, material: renderMaterial,
-  todos: renderTodos, events: renderEvents, data: renderData };
-function go(route) {
-  document.querySelectorAll('nav a').forEach(a => a.classList.toggle('active', a.dataset.route === route));
-  location.hash = route;
-  (routes[route] || renderOverview)();
+  todos: renderTodos, data: renderData };
+// ---- Navigation: 10 Bereiche, verwandte Seiten als Tabs (alte Adressen wie #momentum bleiben gueltig) ----
+const SECTIONS = {
+  modelle:      [['overview', 'Übersicht'], ['momentum', 'Momentum'], ['compare', 'Vergleich'], ['groups', 'Kategorien']],
+  auswertung:   [['report', 'Wochenbericht'], ['points', 'Punkte & Gutschein']],
+  kunden:       [['contacts', 'Liste'], ['leads', 'Leads']],
+  projekte:     [['projekte', 'Board'], ['druckplan', 'Druckplan']],
+  entwuerfe:    [['pipeline', 'Modell-Pipeline'], ['selbst', 'Eigenprojekte']],
+  materialkalk: [['teile', 'Kalkulation & Bauteile'], ['material', 'Filament-Lager']]
+};
+const SECTION_OF = {}; for (const [sec, tabs] of Object.entries(SECTIONS)) tabs.forEach(([r]) => { SECTION_OF[r] = sec; });
+const sectionOf = r => SECTION_OF[r] || r;   // Einzelseiten (heute, revenue, todos, data) sind ihr eigener Bereich
+const lastTab = sec => { try { return localStorage.getItem('tab_' + sec); } catch { return null; } };
+// Hash -> echte Seite: Bereichsnamen (#modelle) oeffnen den zuletzt benutzten Tab.
+function resolveRoute(r) {
+  if (routes[r]) return r;
+  if (SECTIONS[r]) { const lt = lastTab(r); return SECTIONS[r].some(x => x[0] === lt) ? lt : SECTIONS[r][0][0]; }
+  return 'heute';
 }
-document.querySelectorAll('nav a').forEach(a => a.addEventListener('click', () => go(a.dataset.route)));
+let CUR_ROUTE = null;
+function go(route) {
+  route = resolveRoute(route);
+  CUR_ROUTE = route;
+  const sec = sectionOf(route);
+  if (SECTIONS[sec]) { try { localStorage.setItem('tab_' + sec, route); } catch {} }
+  document.querySelectorAll('nav a').forEach(a => { const on = a.dataset.section === sec; a.classList.toggle('active', on); if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
+  if (location.hash.slice(1) !== route) location.hash = route;
+  closeMenu();
+  routes[route]();
+}
+// Klick auf einen Bereich: zuletzt benutzten Tab oeffnen
+document.querySelectorAll('nav a').forEach(a => a.addEventListener('click', e => { e.preventDefault(); go(SECTIONS[a.dataset.section] ? a.dataset.section : a.dataset.route); }));
+// Browser-Zurueck/Vor und manuell geaenderte Adresse
+window.addEventListener('hashchange', () => { const r = location.hash.slice(1); if (r && resolveRoute(r) !== CUR_ROUTE) go(r); });
+
+// ---- Mobil-Menue (Sidebar als ausklappbares Menue unter 800 px) ----
+const sidebarEl = () => document.getElementById('sidebar');
+function openMenu() { const sb = sidebarEl(); sb.classList.add('open'); $('#navScrim').hidden = false; $('#navToggle').setAttribute('aria-expanded', 'true'); $('#navToggle').setAttribute('aria-label', t('Menü schließen')); const a = sb.querySelector('nav a.active') || sb.querySelector('nav a'); if (a) a.focus({ preventScroll: true }); }
+function closeMenu() { const sb = sidebarEl(); if (!sb || !sb.classList.contains('open')) return; sb.classList.remove('open'); $('#navScrim').hidden = true; $('#navToggle').setAttribute('aria-expanded', 'false'); $('#navToggle').setAttribute('aria-label', t('Menü öffnen')); }
+$('#navToggle').addEventListener('click', () => sidebarEl().classList.contains('open') ? closeMenu() : openMenu());
+$('#navScrim').addEventListener('click', closeMenu);
 
 // Navigations-Beschriftungen je Sprache (Zähler-Badge bleibt erhalten).
 const NAVLABELS = {
-  heute: ['Heute', 'Today'], overview: ['Übersicht', 'Overview'], momentum: ['Momentum', 'Momentum'],
-  compare: ['Vergleich', 'Comparison'], groups: ['Kategorien', 'Categories'], points: ['Punkte', 'Points'],
-  report: ['Bericht', 'Report'], contacts: ['Kunden', 'Customers'], leads: ['Leads', 'Leads'],
-  projekte: ['Projekte', 'Projects'], revenue: ['Finanzen', 'Finance'], teile: ['Teile & Kalkulation', 'Parts & Costing'],
-  pipeline: ['Produkte', 'Products'], selbst: ['Eigenprojekte', 'Own Projects'], druckplan: ['Druckplan', 'Print Queue'], material: ['Filament-Lager', 'Filament Stock'],
-  todos: ['Aufgaben', 'Tasks'], data: ['Daten & Pull', 'Data & Sync']
+  heute: ['Heute', 'Today'], modelle: ['Modelle', 'Models'], auswertung: ['Auswertung', 'Analysis'], kunden: ['Kunden', 'Customers'],
+  projekte: ['Projekte', 'Projects'], revenue: ['Finanzen', 'Finance'], entwuerfe: ['Ideen & Entwürfe', 'Ideas & Drafts'],
+  materialkalk: ['Material & Kalkulation', 'Material & Costing'], todos: ['Aufgaben', 'Tasks'], data: ['Daten & Pull', 'Data & Sync']
 };
 function applyNavLang() {
   const i = LANG.cur === 'en' ? 1 : 0;
-  document.querySelectorAll('nav a').forEach(a => { const lbl = NAVLABELS[a.dataset.route]; if (!lbl) return;
+  document.querySelectorAll('nav a').forEach(a => { const lbl = NAVLABELS[a.dataset.section]; if (!lbl) return;
     const cnt = a.querySelector('.cnt'); a.textContent = lbl[i]; if (cnt) a.append(cnt); });
   document.querySelectorAll('.nav-sep').forEach(d => { d.dataset.de = d.dataset.de || d.textContent; d.textContent = t(d.dataset.de); });
   const gs = $('#globalSearch'); if (gs) { gs.dataset.de = gs.dataset.de || gs.placeholder; gs.placeholder = t(gs.dataset.de); }
@@ -131,7 +212,7 @@ function applyNavLang() {
   document.querySelectorAll('#langSw a').forEach(a => a.classList.toggle('on', a.dataset.lang === LANG.cur));
   document.documentElement.lang = LANG.cur;
 }
-document.querySelectorAll('#langSw a').forEach(a => a.addEventListener('click', () => setLang(a.dataset.lang)));
+document.querySelectorAll('#langSw a').forEach(a => a.addEventListener('click', e => { e.preventDefault(); setLang(a.dataset.lang); }));
 function setLang(l) { if (l === LANG.cur) return; LANG.cur = l; try { localStorage.setItem('lang', l); } catch {}
   applyNavLang(); const r = location.hash.slice(1) || 'heute'; (routes[r] || renderOverview)(); }
 
@@ -141,9 +222,26 @@ async function loadOverview() {
   $('#todoCnt').textContent = STATE.overview.openTodos ?? 0;
   renderLastPull();
 }
+// Tab-Leiste eines Bereichs (role=tablist; Pfeiltasten wechseln den Tab).
+function tabBar(sec) {
+  const tabs = SECTIONS[sec]; if (!tabs) return null;
+  const bar = el('div', { class: 'tabbar', role: 'tablist', 'aria-label': t(NAVLABELS[sec] ? NAVLABELS[sec][LANG.cur === 'en' ? 1 : 0] : sec) });
+  tabs.forEach(([r, label]) => {
+    const on = r === CUR_ROUTE;
+    const a = el('a', { class: 'tab' + (on ? ' on' : ''), role: 'tab', href: '#' + r, 'aria-selected': on ? 'true' : 'false', tabindex: on ? '0' : '-1' }, label);
+    a.addEventListener('click', e => { e.preventDefault(); if (!on) go(r); });
+    a.addEventListener('keydown', e => {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      e.preventDefault(); const i = tabs.findIndex(x => x[0] === r), n = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length][0];
+      go(n);
+    });
+    bar.append(a);
+  });
+  return bar;
+}
 function pagehead(title, sub) {
   const v = $('#view'); v.innerHTML = '';
-  v.append(el('div', { class: 'pagehead' }, el('h1', {}, title), sub ? el('p', { class: 'sub' }, sub) : null));
+  v.append(el('div', { class: 'pagehead' }, el('h1', {}, title), sub ? el('p', { class: 'sub' }, sub) : null, tabBar(sectionOf(CUR_ROUTE))));
   const w = el('div', { class: 'wrap' }); v.append(w); return w;
 }
 
@@ -170,14 +268,14 @@ async function renderOverview() {
     w.append(pstrip);
   }
 
-  const stats = [['view','Views'],['impression','Impressions'],['download','Downloads'],['print','Drucke'],
-    ['collect','Gesammelt'],['like','Likes'],['point','Punkte'],['boost','Boost']];
+  const stats = [['view','Views'],['impression','Impressionen'],['download','Downloads'],['print','Drucke'],
+    ['collect','Gesammelt'],['like','Likes'],['point','Punkte gesamt'],['boost','Boost']];
   const strip = el('div', { class: 'stats' });
   stats.forEach(([k, l]) => strip.append(el('div', { class: 'stat' }, el('div', { class: 'v' }, fmt(t[k] || 0)), el('div', { class: 'l' }, l))));
   strip.append(el('div', { class: 'stat' }, el('div', { class: 'v' }, fmt(t.dl30)), el('div', { class: 'l' }, 'DL · 30 T'),
     el('div', { class: 'd muted' }, fmt(t.v30) + ' Views/30T')));
   strip.append(el('div', { class: 'stat' }, el('div', { class: 'v' }, fmt(t.pts30)), el('div', { class: 'l' }, 'Punkte · 30 T')));
-  strip.append(el('div', { class: 'stat' }, el('div', { class: 'v pos' }, eur(t.earned)), el('div', { class: 'l' }, 'Verdient (Lifetime)'),
+  strip.append(el('div', { class: 'stat' }, el('div', { class: 'v pos' }, eur(t.earned)), el('div', { class: 'l' }, 'Verdient gesamt'),
     el('div', { class: 'd muted' }, eur(t.earned30) + ' /30T')));
   w.append(strip);
 
@@ -185,15 +283,7 @@ async function renderOverview() {
   w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Prognose (Trend, letzte 90 Tage)'),
     el('div', { class: 'bd' }, el('div', { class: 'stats', style: 'border:0;margin:0' },
       fcTile('Downloads', t.proj_dl30, t.proj_dl90), fcTile('Views', t.proj_v30, t.proj_v90), fcTile('Punkte', t.proj_pts30, t.proj_pts90),
-      el('div', { class: 'stat' }, el('div', { class: 'v pos' }, eur(t.proj_eur30)), el('div', { class: 'l' }, '€ · +30 T'), el('div', { class: 'd muted' }, eur(t.proj_eur90) + ' · +90 T')),
-      el('div', { class: 'stat' }, el('div', { class: 'v' }, t.voucher_eta_days != null ? '~' + t.voucher_eta_days + ' T' : '–'), el('div', { class: 'l' }, 'nächster 40€-Gutschein'), el('div', { class: 'd muted' }, 'noch ' + fmt(t.voucher_remaining) + ' Punkte'))))));
-
-  if (o.alerts && o.alerts.length) {
-    const al = el('div', { class: 'alerts' });
-    o.alerts.slice(0, 8).forEach(a => al.append(el('div', { class: 'alert', onclick: () => a.design_id && openModel(a.design_id) },
-      el('span', { class: 'tag ' + a.type }, a.type), el('b', {}, a.title || 'Global'), el('span', { class: 'muted' }, '— ' + a.text))));
-    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, `Alerts (${o.alerts.length})`), al));
-  }
+      el('div', { class: 'stat' }, el('div', { class: 'v pos' }, eur(t.proj_eur30)), el('div', { class: 'l' }, '€ · +30 T'), el('div', { class: 'd muted' }, eur(t.proj_eur90) + ' · +90 T'))))));
 
   const search = el('input', { class: 'search', placeholder: 'Modell suchen …', value: searchTerm,
     oninput: e => { searchTerm = e.target.value; draw(); } });
@@ -201,21 +291,39 @@ async function renderOverview() {
   stFilter.value = statusFilter; stFilter.onchange = () => { statusFilter = stFilter.value; draw(); };
   const segSel = el('select', {}, el('option', { value: '' }, 'Segment laden …'), (segments || []).map(s => el('option', { value: s.id }, s.name)));
   segSel.onchange = () => { const s = segments.find(x => x.id == segSel.value); if (s) applySegment(s.config); };
-  const toolbar = el('div', { class: 'toolbar' }, search, el('label', {}, 'Status'), stFilter, segSel,
-    el('button', { class: 'btn sm', onclick: saveSegment }, '＋ Segment'),
-    el('button', { class: 'btn sm ghost', onclick: delSegment, title: 'gewähltes Segment löschen' }, ''),
-    csvBtn('uebersicht.csv'), el('span', { class: 'muted', style: 'margin-left:auto' }, 'Klick = Details'));
-  w.append(toolbar);
-  const wrap = el('div', { class: 'tablewrap' }); w.append(wrap);
-
+  // Spaltenauswahl (gemerkt im Browser). Standard = die wichtigsten Spalten; mobil noch weniger.
   const cols = [
     ['title','Modell','str'],['status','Status','status'],['publish_date','Release','str'],['impression','Impr','n'],['view','Views','n'],
     ['ctr_pct','CTR%','pct'],['download','DL','n'],['dl30','DL30','n'],['v_per_day','V/T','n'],['v_trend','Trend','trend'],
-    ['spark','30T Views','spark'],['collect','Gesamm','n'],['like','Likes','n'],['comment_count','Komm','n'],
+    ['spark','30T Views','spark'],['collect','Gesammelt','n'],['like','Likes','n'],['comment_count','Kommentare','n'],
     ['point','Punkte','n'],['earned','Verdient','eur'],['boost','Boost','n'],['tag_count','Tags','n']];
+  const DEFAULT_COLS = window.innerWidth < 800 ? ['view', 'download', 'v_trend', 'earned']
+    : ['status', 'publish_date', 'impression', 'view', 'ctr_pct', 'download', 'dl30', 'v_trend', 'spark', 'point', 'earned'];
+  let visibleCols = (() => { try { const j = JSON.parse(localStorage.getItem('ov_cols') || 'null'); if (Array.isArray(j) && j.length) return new Set(j); } catch {} return new Set(DEFAULT_COLS); })();
+  const saveCols = () => { try { localStorage.setItem('ov_cols', JSON.stringify([...visibleCols])); } catch {} };
+  const vcols = () => cols.filter(c => c[0] === 'title' || visibleCols.has(c[0]));
+  const colBox = el('div', { class: 'colpick-box' });
+  const drawColBox = () => { colBox.innerHTML = '';
+    cols.filter(c => c[0] !== 'title').forEach(([k, l]) => { const cb = el('input', { type: 'checkbox' }); cb.checked = visibleCols.has(k);
+      cb.onchange = () => { cb.checked ? visibleCols.add(k) : visibleCols.delete(k); saveCols(); draw(); };
+      colBox.append(el('label', { class: 'checkline' }, cb, l)); });
+    colBox.append(el('div', { class: 'row' },
+      el('button', { class: 'btn sm', onclick: () => { visibleCols = new Set(DEFAULT_COLS); saveCols(); drawColBox(); draw(); } }, 'Standard'),
+      el('button', { class: 'btn sm', onclick: () => { visibleCols = new Set(cols.map(c => c[0])); saveCols(); drawColBox(); draw(); } }, 'Alle'))); };
+  const colPick = el('details', { class: 'colpick' }, el('summary', { class: 'btn sm' }, 'Spalten'), colBox);
+  const closeColPick = e => { if (!colPick.isConnected) { document.removeEventListener('click', closeColPick); return; } if (e.target.isConnected && !colPick.contains(e.target)) colPick.open = false; };   // Ziel schon ersetzt (Neuaufbau der Liste) = kein Aussenklick
+  document.addEventListener('click', closeColPick);
+  const toolbar = el('div', { class: 'toolbar' }, search, el('label', {}, 'Status'), stFilter, segSel,
+    el('button', { class: 'btn sm', onclick: saveSegment }, '＋ Segment'),
+    el('button', { class: 'btn sm ghost', onclick: delSegment, title: 'gewähltes Segment löschen' }, '✕'),
+    colPick, csvBtn('uebersicht.csv'), el('span', { class: 'muted', style: 'margin-left:auto' }, 'Klick = Details'));
+  w.append(toolbar);
+  const wrap = el('div', { class: 'tablewrap' }); w.append(wrap);
+  drawColBox();
+
   function applySegment(c) { searchTerm = c.search || ''; statusFilter = c.status || ''; sortKey = c.sortKey || 'download'; sortDir = c.sortDir || -1; search.value = searchTerm; stFilter.value = statusFilter; draw(); }
-  async function saveSegment() { const name = prompt('Segment-Name:'); if (!name) return; const v = await jpost('/views', { name, config: { search: searchTerm, status: statusFilter, sortKey, sortDir } }); segments.push({ ...v, config: JSON.parse(v.config) }); segSel.append(el('option', { value: v.id }, v.name)); segSel.value = v.id; toast('Segment gespeichert.'); }
-  async function delSegment() { const id = segSel.value; if (!id) return toast('Erst ein Segment wählen.'); await api('/views/' + id, { method: 'DELETE' }); segments = segments.filter(s => s.id != id); renderOverview(); }
+  async function saveSegment() { const name = await askText({ title: 'Segment speichern', text: 'Speichert Suche, Status-Filter und Sortierung unter einem Namen.', placeholder: 'z. B. Nur Live-Modelle', okText: 'Speichern' }); if (!name || !name.trim()) return; const v = await jpost('/views', { name: name.trim(), config: { search: searchTerm, status: statusFilter, sortKey, sortDir } }); segments.push({ ...v, config: JSON.parse(v.config) }); segSel.append(el('option', { value: v.id }, v.name)); segSel.value = v.id; toast('Segment gespeichert.'); }
+  async function delSegment() { const id = segSel.value; if (!id) return toast('Erst ein Segment wählen.'); await delWithUndo('/views/' + id, 'Segment', () => { segments = null; renderOverview(); }); segments = segments.filter(s => s.id != id); renderOverview(); }
   function draw() {
     let rows = o.models.filter(m => (!searchTerm || (m.title || '').toLowerCase().includes(searchTerm.toLowerCase())) && (!statusFilter || stOf(m) === statusFilter));
     rows.sort((a, b) => {
@@ -223,13 +331,13 @@ async function renderOverview() {
       if (sortKey === 'title' || sortKey === 'publish_date') return sortDir * String(x || '').localeCompare(String(y || ''));
       return sortDir * (((x ?? -1)) - ((y ?? -1)));
     });
-    const thead = el('tr', {}, cols.map(([k, l]) => el('th', { class: k === 'title' ? '' : 'n',
+    const thead = el('tr', {}, vcols().map(([k, l]) => el('th', { class: k === 'title' ? '' : 'n',
       onclick: () => { if (sortKey === k) sortDir *= -1; else { sortKey = k; sortDir = -1; } draw(); } },
       l + (sortKey === k ? (sortDir < 0 ? ' ▾' : ' ▴') : ''))));
     const tb = el('tbody', {}, rows.map(m => el('tr', { onclick: () => openModel(m.design_id) },
-      cols.map(([k, , type]) => {
+      vcols().map(([k, , type]) => {
         if (type === 'status') return el('td', {}, statusBadge(stOf(m)));
-        if (type === 'str') return el('td', { class: k === 'title' ? 'title' : '' }, k === 'title' ? (m.title || m.design_id) : (m[k] || '–'));
+        if (type === 'str') return el('td', { class: k === 'title' ? 'title' : '' }, k === 'title' ? (m.title || m.design_id) : k === 'publish_date' ? dmy(m[k]) : (m[k] || '–'));
         if (type === 'pct') return el('td', { class: 'n' }, m[k] != null ? fmt1(m[k]) : '–');
         if (type === 'eur') return el('td', { class: 'n pos' }, eur(m[k]));
         if (type === 'trend') return trendCell(m.v_trend);
@@ -263,6 +371,27 @@ async function renderMomentum() {
 // ============ VERGLEICH ============
 let cmpSel = new Set(), cmpMetric = 'view', cmpGran = 'day', cmpMode = 'date', cmpCum = true, cmpChart = null, cmpView = 'models';
 let grpSort = { key: 'download', dir: -1 };
+// Sortierbare Gruppen-Tabelle (Kategorien-Seite UND Vergleich): rows = Ergebnis von /analytics/groups.
+function groupTable(rows, cols, onRow) {
+  const wrap = el('div', { class: 'tablewrap' });
+  const draw = () => {
+    const sorted = [...rows].sort((x1, y1) => {
+      const x = x1[grpSort.key], y = y1[grpSort.key];
+      if (grpSort.key === 'key') return grpSort.dir * String(x || '').localeCompare(String(y || ''), 'de');
+      return grpSort.dir * ((x ?? -1) - (y ?? -1));
+    });
+    wrap.innerHTML = '';
+    wrap.append(el('table', {},
+      el('thead', {}, el('tr', {}, cols.map(([k, l]) => el('th', { class: k === 'key' ? '' : 'n',
+        onclick: () => { if (grpSort.key === k) grpSort.dir *= -1; else { grpSort.key = k; grpSort.dir = k === 'key' ? 1 : -1; } draw(); } },
+        l + (grpSort.key === k ? (grpSort.dir < 0 ? ' ▾' : ' ▴') : ''))))),
+      el('tbody', {}, sorted.map(r => el('tr', { onclick: () => onRow(r) },
+        cols.map(([k]) => k === 'key' ? el('td', { class: 'title' }, r.key)
+          : el('td', { class: 'n' }, k === 'ctr' ? (r.ctr != null ? fmt1(r.ctr) : '–') : fmt(r[k]))))))));
+  };
+  draw();
+  return wrap;
+}
 async function renderCompare() {
   if (!STATE.overview) await loadOverview();
   const w = pagehead('Vergleich', 'Modelle überlagern — nach Datum oder nach Alter seit Release.');
@@ -316,35 +445,19 @@ async function drawCompare() {
     const by = cmpView === 'category' ? 'category' : cmpView === 'tag' ? 'tag' : 'group';
     const { rows } = await api('/analytics/groups?by=' + by);
     tbl.append(el('div', { class: 'hd' }, 'Kennzahlen je ' + (by === 'tag' ? 'Tag' : by === 'group' ? 'eigener Kategorie' : 'MakerWorld-Kategorie') + ' — Spaltenkopf sortiert'));
-    const cols = [['key','Gruppe'],['count','#'],['view','Views'],['impression','Impr'],['ctr','CTR%'],['download','DL'],['dl30','DL30'],['collect','Gesamm'],['like','Likes'],['point','Punkte']];
-    const wrap = el('div', { class: 'tablewrap' }); tbl.append(wrap);
-    const draw = () => {
-      const sorted = [...rows].sort((a, b) => {
-        let x = a[grpSort.key], y = b[grpSort.key];
-        if (grpSort.key === 'key') return grpSort.dir * String(x || '').localeCompare(String(y || ''), 'de');
-        return grpSort.dir * (((x ?? -1)) - ((y ?? -1)));
-      });
-      wrap.innerHTML = '';
-      wrap.append(el('table', {},
-        el('thead', {}, el('tr', {}, cols.map(([k, l]) => el('th', { class: k === 'key' ? '' : 'n',
-          onclick: () => { if (grpSort.key === k) grpSort.dir *= -1; else { grpSort.key = k; grpSort.dir = k === 'key' ? 1 : -1; } draw(); } },
-          l + (grpSort.key === k ? (grpSort.dir < 0 ? ' ▾' : ' ▴') : ''))))),
-        el('tbody', {}, sorted.map(r => el('tr', { onclick: () => openGroup(by, r.key) },
-          cols.map(([k]) => k === 'key' ? el('td', { class: 'title' }, r.key)
-            : el('td', { class: 'n' }, k === 'ctr' ? (r.ctr != null ? fmt1(r.ctr) : '–') : fmt(r[k]))))))));
-    };
-    draw();
+    const cols = [['key','Gruppe'],['count','#'],['view','Views'],['impression','Impr'],['ctr','CTR%'],['download','DL'],['dl30','DL30'],['collect','Gesammelt'],['like','Likes'],['point','Punkte']];
+    tbl.append(groupTable(rows, cols, r => openGroup(by, r.key)));
     return;
   }
   tbl.append(el('div', { class: 'hd' }, 'Kennzahlen im Vergleich'));
   const chosen = STATE.overview.models.filter(m => cmpSel.has(m.design_id));
-  const cols = [['title','Modell'],['publish_date','Release'],['view','Views'],['impression','Impr'],['ctr_pct','CTR%'],['download','DL'],['dl30','DL30'],['collect','Gesamm'],['like','Likes'],['point','Punkte'],['earned','Verdient']];
+  const cols = [['title','Modell'],['publish_date','Release'],['view','Views'],['impression','Impr'],['ctr_pct','CTR%'],['download','DL'],['dl30','DL30'],['collect','Gesammelt'],['like','Likes'],['point','Punkte'],['earned','Verdient']];
   tbl.append(el('div', { class: 'tablewrap' }, el('table', {},
     el('thead', {}, el('tr', {}, cols.map(([k, l]) => el('th', { class: k === 'title' ? '' : 'n' }, l)))),
     el('tbody', {}, chosen.map(m => el('tr', { onclick: () => openModel(m.design_id) },
       cols.map(([k]) => k === 'title' ? el('td', { class: 'title' }, m.title || m.design_id)
         : k === 'earned' ? el('td', { class: 'n pos' }, eur(m.earned))
-        : el('td', { class: 'n' }, k === 'publish_date' ? (m.publish_date || '–') : k === 'ctr_pct' ? (m.ctr_pct != null ? fmt1(m.ctr_pct) : '–') : fmt(m[k])))))))));
+        : el('td', { class: 'n' }, k === 'publish_date' ? dmy(m.publish_date) : k === 'ctr_pct' ? (m.ctr_pct != null ? fmt1(m.ctr_pct) : '–') : fmt(m[k])))))))));
 }
 
 // ============ KATEGORIEN ============
@@ -356,25 +469,9 @@ async function renderGroups() {
   w.append(el('div', { class: 'toolbar' }, el('label', {}, 'Gruppieren'), sel, csvBtn('kategorien.csv'),
     grpBy === 'group' ? el('span', { class: 'muted' }, 'Eigene Gruppe pro Modell im Detail unter „Ziele & Gruppe" setzen.') : null));
   const { rows } = await api('/analytics/groups?by=' + grpBy);
-  w.append(el('p', { class: 'muted', style: 'margin:4px 0 8px' }, 'Klick auf eine Zeile → alle Produkte der Gruppe · Klick auf Spaltenkopf sortiert.'));
-  const wrap = el('div', { class: 'tablewrap' }); w.append(wrap);
-  const cols = [['key','Gruppe'],['count','#'],['view','Views'],['impression','Impr'],['ctr','CTR%'],['download','DL'],['dl30','DL30'],['print','Drucke'],['collect','Gesamm'],['like','Likes'],['point','Punkte'],['boost','Boost']];
-  const draw = () => {
-    const sorted = [...rows].sort((a, b) => {
-      let x = a[grpSort.key], y = b[grpSort.key];
-      if (grpSort.key === 'key') return grpSort.dir * String(x || '').localeCompare(String(y || ''), 'de');
-      return grpSort.dir * (((x ?? -1)) - ((y ?? -1)));
-    });
-    wrap.innerHTML = '';
-    wrap.append(el('table', {},
-      el('thead', {}, el('tr', {}, cols.map(([k, l]) => el('th', { class: k === 'key' ? '' : 'n',
-        onclick: () => { if (grpSort.key === k) grpSort.dir *= -1; else { grpSort.key = k; grpSort.dir = k === 'key' ? 1 : -1; } draw(); } },
-        l + (grpSort.key === k ? (grpSort.dir < 0 ? ' ▾' : ' ▴') : ''))))),
-      el('tbody', {}, sorted.map(r => el('tr', { onclick: () => openGroup(grpBy, r.key) },
-        cols.map(([k]) => k === 'key' ? el('td', { class: 'title' }, r.key)
-          : el('td', { class: 'n' }, k === 'ctr' ? (r.ctr != null ? fmt1(r.ctr) : '–') : fmt(r[k]))))))));
-  };
-  draw();
+  w.append(el('p', { class: 'muted', style: 'margin:4px 0 8px' }, 'Klick auf eine Zeile → alle Modelle der Gruppe · Klick auf Spaltenkopf sortiert.'));
+  const cols = [['key','Gruppe'],['count','#'],['view','Views'],['impression','Impr'],['ctr','CTR%'],['download','DL'],['dl30','DL30'],['print','Drucke'],['collect','Gesammelt'],['like','Likes'],['point','Punkte'],['boost','Boost']];
+  w.append(groupTable(rows, cols, r => openGroup(grpBy, r.key)));
 
   // Schnell-Zuordner für eigene Kategorien
   if (grpBy === 'group') {
@@ -386,12 +483,14 @@ async function renderGroups() {
       inp.onchange = async () => { m.group_label = inp.value || null; await jpost('/model/' + m.design_id + '/group', { group_label: inp.value || null }, 'PUT'); toast('Kategorie gespeichert.'); };
       list.append(el('div', { class: 'checkline' }, el('span', { style: 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap' }, m.title || m.design_id), inp));
     });
-    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Eigene Kategorie je Produkt zuordnen'), el('div', { class: 'bd' }, dl, list)));
+    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Eigene Kategorie je Modell zuordnen'), el('div', { class: 'bd' }, dl, list)));
   }
 
   // Tag-Empfehlungen: welche Tags bringen im Schnitt mehr Reichweite
-  const tp = await api('/analytics/tag-perf');
-  const top = tp.tags.filter(t => t.models >= 1).slice(0, 15);
+  const tg = (await api('/analytics/groups?by=tag')).rows.filter(r => r.key !== '—')
+    .map(r => ({ tag: r.key, models: r.count, views: r.view, viewsPerModel: Math.round(r.view / r.count), dlPerModel: +(r.download / r.count).toFixed(1) }))
+    .sort((p, q) => q.viewsPerModel - p.viewsPerModel);
+  const top = tg.slice(0, 15);
   const wrap2 = el('div', { class: 'tablewrap' });
   wrap2.append(el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Tag'), el('th', { class: 'n' }, 'Modelle'), el('th', { class: 'n' }, 'Ø Views/Modell'), el('th', { class: 'n' }, 'Ø DL/Modell'), el('th', { class: 'n' }, 'Views gesamt'))),
     el('tbody', {}, top.map(t => el('tr', {}, el('td', { class: 'title' }, t.tag), el('td', { class: 'n' }, fmt(t.models)), el('td', { class: 'n' }, fmt(t.viewsPerModel)), el('td', { class: 'n' }, fmt1(t.dlPerModel)), el('td', { class: 'n muted' }, fmt(t.views)))))));
@@ -411,7 +510,7 @@ async function openGroup(by, key) {
   $('#drawer').classList.remove('hidden');
   const sum = k => members.reduce((s, m) => s + (m[k] || 0), 0);
   inner.append(el('div', { class: 'dh' }, el('div', { style: 'flex:1' },
-    el('h1', {}, key), el('div', { class: 'muted' }, `${by === 'tag' ? 'Tag' : by === 'group' ? 'Eigene Kategorie' : 'MakerWorld-Kategorie'} · ${members.length} Produkte`)),
+    el('h1', {}, key), el('div', { class: 'muted' }, `${by === 'tag' ? 'Tag' : by === 'group' ? 'Eigene Kategorie' : 'MakerWorld-Kategorie'} · ${members.length} Modelle`)),
     el('span', { class: 'close', onclick: closeDrawer }, '✕')));
   const body = el('div', { class: 'dbody' }); inner.append(body);
   const strip = el('div', { class: 'stats' });
@@ -420,12 +519,12 @@ async function openGroup(by, key) {
   strip.append(el('div', { class: 'stat' }, el('div', { class: 'v pos' }, eur(sum('earned'))), el('div', { class: 'l' }, 'Verdient')));
   body.append(strip);
   // Chart: Downloads kumuliert je Produkt
-  body.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Downloads kumuliert je Produkt'), el('div', { class: 'bd' }, el('div', { class: 'chartbox' }, el('canvas', { id: 'groupChart' })))));
+  body.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Downloads kumuliert je Modell'), el('div', { class: 'bd' }, el('div', { class: 'chartbox' }, el('canvas', { id: 'groupChart' })))));
   const { series } = await api(`/timeseries?ids=${members.map(m => m.design_id).join(',')}&metric=download&granularity=day&mode=date&cumulative=1`);
   if (groupChart) groupChart.destroy();
   groupChart = new Chart($('#groupChart'), { type: 'line', data: alignSeries(series, true), options: chartOpts() });
   // Produkt-Tabelle
-  const cols = [['title','Produkt'],['view','Views'],['ctr_pct','CTR%'],['download','DL'],['dl30','DL30'],['collect','Gesamm'],['like','Likes'],['point','Punkte'],['earned','Verdient']];
+  const cols = [['title','Modell'],['view','Views'],['ctr_pct','CTR%'],['download','DL'],['dl30','DL30'],['collect','Gesammelt'],['like','Likes'],['point','Punkte'],['earned','Verdient']];
   body.append(el('div', { class: 'tablewrap' }, el('table', {},
     el('thead', {}, el('tr', {}, cols.map(([k, l]) => el('th', { class: k === 'title' ? '' : 'n' }, l)))),
     el('tbody', {}, members.map(m => el('tr', { onclick: () => openModel(m.design_id) },
@@ -443,11 +542,11 @@ async function renderPoints() {
   const ac = acc.latest;
   const strip = el('div', { class: 'stats' });
   if (ac) strip.append(
-    el('div', { class: 'stat', style: 'border-right:2px solid var(--accent)' }, el('div', { class: 'v pos' }, fmt(ac.point) + ' P'), el('div', { class: 'l' }, 'Kontostand (Wallet)'), el('div', { class: 'd pos' }, '≈ ' + eur(ac.point * acc.rate))),
+    el('div', { class: 'stat', style: 'border-right:2px solid var(--accent)' }, el('div', { class: 'v pos' }, fmt(ac.point) + ' P'), el('div', { class: 'l' }, 'Kontostand'), el('div', { class: 'd pos' }, '≈ ' + eur(ac.point * acc.rate))),
     el('div', { class: 'stat' }, el('div', { class: 'v' }, fmt1(ac.point_exclusive)), el('div', { class: 'l' }, 'davon Exklusiv'), el('div', { class: 'd muted' }, 'Regulär ' + fmt1(ac.point_regular))));
   strip.append(
-    el('div', { class: 'stat' }, el('div', { class: 'v' }, fmt(d.totals.point)), el('div', { class: 'l' }, 'Punkte gesamt (Lifetime)')),
-    el('div', { class: 'stat' }, el('div', { class: 'v pos' }, eur(d.totals.earned)), el('div', { class: 'l' }, 'Verdient (Lifetime)')),
+    el('div', { class: 'stat' }, el('div', { class: 'v' }, fmt(d.totals.point)), el('div', { class: 'l' }, 'Punkte gesamt')),
+    el('div', { class: 'stat' }, el('div', { class: 'v pos' }, eur(d.totals.earned)), el('div', { class: 'l' }, 'Verdient gesamt')),
     el('div', { class: 'stat' }, el('div', { class: 'v' }, fmt(d.totals.pts30)), el('div', { class: 'l' }, 'Punkte · 30 T'), el('div', { class: 'd muted' }, eur(d.totals.earned30) + ' /30T')),
     el('div', { class: 'stat' }, el('div', { class: 'v' }, fmt(d.totals.boost)), el('div', { class: 'l' }, 'Boost gesamt')));
   w.append(strip);
@@ -484,7 +583,7 @@ async function renderPoints() {
     const bar = (label, val) => el('div', { class: 'checkline' }, el('span', { style: 'flex:1' }, label),
       el('div', { class: 'goalbar', style: 'width:160px' }, el('i', { style: `width:${pctOf(val)}%` }), el('span', {}, pctOf(val) + '%')),
       el('span', { class: 'num muted', style: 'font-size:11px' }, fmt(val) + ' P'));
-    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Herkunft der Punkte (Lifetime)'),
+    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Herkunft der Punkte (gesamt)'),
       el('div', { class: 'bd muted', style: 'padding-bottom:0' }, 'MakerWorlds eigene Aufteilung — daraus + der Rate je Download/Druck lässt sich das Punktesystem annähern. Die Rate wird mit jedem täglichen Pull genauer (aktuell ' + fmt(pm.fit.samples) + ' Tagesdatenpunkte).'),
       el('div', { class: 'bd' }, bar('Modell (Downloads)', sh.model), bar('Druckprofil (Drucke)', sh.inst), bar('Bewertungen', sh.ratings), bar('Sonstige', sh.others))));
     if (pm.byModel && pm.byModel.length) {
@@ -496,7 +595,7 @@ async function renderPoints() {
           el('td', { class: 'title' }, m.title),
           el('td', { class: 'n' }, fmt(m.events)),
           el('td', { class: 'n' }, m.avgGap != null ? fmt1(m.avgGap) + ' T' : '–'),
-          el('td', { class: 'n muted' }, m.lastDate || '–'),
+          el('td', { class: 'n muted' }, dmy(m.lastDate)),
           el('td', { class: 'n ' + ((m.daysSince ?? 0) > (m.avgGap ?? 1e9) ? 'neg' : 'muted') }, m.daysSince != null ? m.daysSince : '–'),
           el('td', { class: 'n pos' }, '+' + fmt(m.pred30)))))));
       w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Punkte-Timing & Prognose je Modell', el('span', { class: 'muted', style: 'font-weight:400;text-transform:none' }, '„Tage her" rot = überfällig ggü. Ø-Abstand')), wrap2));
@@ -508,7 +607,7 @@ async function renderPoints() {
 async function renderReport() {
   if (!STATE.overview) await loadOverview();
   const o = STATE.overview, models = o.models, t = o.totals;
-  const w = pagehead('Bericht', 'Wochenrückblick — Bewegung der letzten 7 Tage, Prognose und offene Punkte.');
+  const w = pagehead('Wochenbericht', 'Wochenrückblick — Bewegung der letzten 7 Tage, Prognose und offene Punkte.');
   w.append(el('div', { class: 'toolbar' }, el('button', { class: 'btn sm', onclick: () => window.print() }, 'Drucken / PDF')));
 
   const dl7 = models.reduce((s, m) => s + (m.dl7 || 0), 0);
@@ -553,19 +652,13 @@ async function renderReport() {
       el('div', { class: 'bd muted', style: 'padding-bottom:0' }, 'Über alle Modelle: durchschnittliche CTR-Veränderung vor/nach einer Änderung + Anteil der Änderungen, die die CTR verbessert haben („Trefferquote"). Zeigt, welcher Hebel wirklich zieht.'), wrap));
   }
 
-  // Alerts + letzte Änderungen
-  if (o.alerts && o.alerts.length) {
-    const al = el('div', { class: 'alerts' });
-    o.alerts.forEach(a => al.append(el('div', { class: 'alert', onclick: () => a.design_id && openModel(a.design_id) },
-      el('span', { class: 'tag ' + a.type }, a.type), el('b', {}, a.title || 'Global'), el('span', { class: 'muted' }, '— ' + a.text))));
-    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, `Alerts (${o.alerts.length})`), al));
-  }
+  // Letzte Änderungen
   const evs = await api('/events');
   const byId = Object.fromEntries(models.map(m => [m.design_id, m.title]));
   const recent = evs.slice(0, 12);
   const list = el('ul', { class: 'timeline' });
   if (!recent.length) list.append(el('li', { class: 'muted' }, 'keine Einträge'));
-  recent.forEach(ev => list.append(el('li', {}, el('span', { class: 'date' }, ev.date), el('span', { class: 'pill' }, ev.type || 'other'),
+  recent.forEach(ev => list.append(el('li', {}, el('span', { class: 'date' }, dmy(ev.date)), el('span', { class: 'pill' }, ev.type || 'other'),
     el('div', { style: 'flex:1' }, el('b', {}, ev.title || ''), el('div', { class: 'muted' }, (ev.design_id ? (byId[ev.design_id] || ev.design_id) : 'Global') + (ev.note ? ' — ' + ev.note : ''))))));
   w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Letzte Änderungen'), el('div', { class: 'bd' }, list)));
 }
@@ -600,17 +693,18 @@ async function renderTodos() {
   w.append(el('div', { class: 'card' }, el('div', { class: 'bd' }, list)));
 }
 function todoRow(t, after) {
-  const cb = el('input', { type: 'checkbox' }); cb.checked = !!t.done;
+  const cb = el('input', { type: 'checkbox', 'aria-label': 'Erledigt: ' + (t.title || '') }); cb.checked = !!t.done;
   cb.onchange = async () => { await jpost('/todos/' + t.id, { done: cb.checked }, 'PUT'); await loadOverview(); after && after(); };
   const overdue = t.due_date && !t.done && t.due_date < today();
   const link = t.contact_name ? el('span', { class: 'pill', onclick: () => openContact(t.contact_id) }, '' + t.contact_name + (t.project_title ? ' · ' + t.project_title : ''))
+    : t.project_title ? el('span', { class: 'pill', onclick: () => openProject(t.project_id) }, t.project_title)
     : t.model_title ? el('span', { class: 'pill', onclick: () => openModel(t.design_id) }, t.model_title)
     : el('span', { class: 'pill' }, 'global');
   return el('li', { class: 'todo' + (t.done ? ' done' : '') },
     el('span', { class: 'prio p' + (t.priority ?? 1) }), cb,
     el('span', { class: 't' }, t.title), link,
     t.due_date ? el('span', { class: 'due' + (overdue ? ' over' : '') }, t.due_date) : null,
-    el('button', { class: 'btn sm ghost', onclick: async () => { await api('/todos/' + t.id, { method: 'DELETE' }); await loadOverview(); after && after(); } }, '✕'));
+    el('button', { class: 'btn sm ghost', onclick: async () => { await delWithUndo('/todos/' + t.id, 'Aufgabe', async () => { await loadOverview(); after && after(); }); await loadOverview(); after && after(); } }, '✕'));
 }
 
 // ---- Drag & Drop für Kanban-Boards (Alternative zum Dropdown) ------------
@@ -643,11 +737,13 @@ function stagePath(stages, curKey, onSelect) {
 }
 
 // ============ PIPELINE (Kanban) ============
+// Lange Spalten (z.B. "Live" mit 20 Karten) zeigen zunaechst die ersten 8; per Knopf alle.
+const PIPE_LIMIT = 8, pipeExpanded = {};
 async function renderPipeline() {
   if (!STATE.overview) await loadOverview();
-  const w = pagehead('Pipeline', 'Von der Idee bis Archiviert. Geplante Produkte werden beim Pull automatisch mit dem echten Modell verschmolzen (Titel-Abgleich).');
+  const w = pagehead('Modell-Pipeline', 'Von der Idee bis Archiviert. Geplante Modelle werden beim Pull automatisch mit dem echten Modell verschmolzen (Titel-Abgleich).');
   w.append(el('div', { class: 'toolbar' },
-    el('button', { class: 'btn primary sm', onclick: planProduct }, '＋ Produkt planen'),
+    el('button', { class: 'btn primary sm', onclick: planProduct }, '＋ Modell planen'),
     el('span', { class: 'muted' }, 'Neue Idee anlegen — Titel exakt wie später auf MakerWorld, dann verschmilzt der Pull automatisch.')));
   const all = [...STATE.overview.models, ...(STATE.overview.planned || [])];
   const board = el('div', { class: 'board' });
@@ -656,7 +752,7 @@ async function renderPipeline() {
     const col = el('div', { class: 'col' }, el('div', { class: 'colhd', style: `border-top:3px solid ${STATUS_COLOR[sv]}` }, sl, el('span', { class: 'cnt' }, members.length)));
     dndColumn(col, sv, async (id, stage) => { const mm = all.find(x => x.design_id === id); if (mm) mm.status = stage;
       await jpost('/model/' + id + '/status', { status: stage }, 'PUT'); renderPipeline(); });
-    members.forEach(m => {
+    (pipeExpanded[sv] ? members : members.slice(0, PIPE_LIMIT)).forEach(m => {
       const planned = !!m.planned;
       const sel = el('select', { class: 'sm', onclick: e => e.stopPropagation() }, STATUSES.map(([v, l]) => el('option', { value: v }, l)));
       sel.value = sv;
@@ -670,12 +766,14 @@ async function renderPipeline() {
       col.append(card);
     });
     if (!members.length) col.append(el('div', { class: 'muted', style: 'padding:8px' }, '—'));
+    if (members.length > PIPE_LIMIT) col.append(el('button', { class: 'btn sm ghost colmore', onclick: () => { pipeExpanded[sv] = !pipeExpanded[sv]; renderPipeline(); } },
+      pipeExpanded[sv] ? 'weniger anzeigen' : `${members.length - PIPE_LIMIT} weitere anzeigen`));
     board.append(col);
   });
   w.append(board);
 }
 async function planProduct() {
-  const title = prompt('Titel des geplanten Produkts (möglichst exakt wie später auf MakerWorld):');
+  const title = await askText({ title: 'Modell planen', text: 'Titel möglichst exakt wie später auf MakerWorld — dann verschmilzt der Pull das Modell automatisch.', okText: 'Planen' });
   if (!title || !title.trim()) return;
   await jpost('/products/plan', { title: title.trim(), status: 'idee' });
   await loadOverview(); renderPipeline(); toast('Geplant: ' + title.trim());
@@ -689,7 +787,7 @@ async function openPlanned(id) {
   $('#drawer').classList.remove('hidden');
   const debounce = (fn, ms = 600) => { let t; return () => { clearTimeout(t); t = setTimeout(fn, ms); }; };
 
-  const titleI = el('input', { value: m.title || '', style: 'font-size:14px;font-weight:600;flex:1;min-width:220px' });
+  const titleI = el('input', { value: m.title || '', 'aria-label': 'Titel des geplanten Modells', style: 'font-size:14px;font-weight:600;flex:1;min-width:220px' });
   const statusSel = el('select', {}, [['idee','Idee'],['arbeit','In Arbeit']].map(([v, l]) => el('option', { value: v }, l)));
   statusSel.value = ['idee','arbeit'].includes(stOf(m)) ? stOf(m) : 'idee';
   statusSel.onchange = async () => { await jpost('/model/' + id + '/status', { status: statusSel.value }, 'PUT'); loadOverview(); };
@@ -702,7 +800,7 @@ async function openPlanned(id) {
 
   // Beschreibung + Tags (autosave via meta)
   const descTa = el('textarea', { style: 'width:100%;height:140px', placeholder: 'Beschreibung entwerfen …' }, m.description || '');
-  const tagsI = el('input', { style: 'width:100%', placeholder: 'Tags, mit Komma getrennt (z.B. bierdeckel, bundesliga, geschenk)', value: (Array.isArray(m.tags) ? m.tags : []).join(', ') });
+  const tagsI = el('input', { style: 'width:100%', placeholder: 'Tags, mit Komma getrennt (z.B. untersetzer, geschenk, magnet)', value: (Array.isArray(m.tags) ? m.tags : []).join(', ') });
   const tagsPrev = el('div', { class: 'tags' });
   const metaHd = el('span', { class: 'muted', style: 'font-weight:400;text-transform:none' }, 'autospeichern');
   const drawTagPrev = () => { tagsPrev.innerHTML = ''; tagsI.value.split(',').map(t => t.trim()).filter(Boolean).forEach(t => tagsPrev.append(el('span', { class: 'pill' }, t))); };
@@ -719,40 +817,25 @@ async function openPlanned(id) {
   body.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Notizen', noteHd), el('div', { class: 'bd' }, notesTa)));
 
   // Kategorie
-  const grpI = el('input', { value: m.group_label || '', placeholder: 'z.B. Bierdeckel', style: 'width:180px' });
+  const grpI = el('input', { value: m.group_label || '', placeholder: 'z.B. Untersetzer', style: 'width:180px' });
   grpI.addEventListener('change', () => jpost('/model/' + id + '/group', { group_label: grpI.value || null }, 'PUT').then(() => { loadOverview(); toast('Kategorie gespeichert.'); }));
   body.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Kategorie'), el('div', { class: 'bd row' }, el('label', {}, 'Gruppe'), grpI)));
 
   // Todos
   const tl = el('ul', { class: 'todolist' });
   const drawTodos = todos => { tl.innerHTML = ''; if (!todos.length) tl.append(el('li', { class: 'muted' }, 'Keine Aufgaben.'));
-    todos.forEach(tdo => tl.append(todoRow(tdo, async () => { const nd = await api('/model/' + id); drawTodos(nd.todos); }))); };
+    todos.forEach(tdo => tl.append(todoRow(tdo, async () => { drawTodos(await api('/model/' + id + '/todos')); }))); };
   const tIn = el('input', { placeholder: 'Aufgabe …', style: 'flex:1' });
   const tPrio = el('select', {}, [['1','normal'],['2','hoch'],['0','niedrig']].map(([v, l]) => el('option', { value: v }, l)));
   const tDue = el('input', { type: 'date' });
-  const addTodo = async () => { if (!tIn.value.trim()) return; await jpost('/todos', { design_id: id, title: tIn.value.trim(), priority: +tPrio.value, due_date: tDue.value || null }); tIn.value = ''; tDue.value = ''; const nd = await api('/model/' + id); drawTodos(nd.todos); loadOverview(); };
+  const addTodo = async () => { if (!tIn.value.trim()) return; await jpost('/todos', { design_id: id, title: tIn.value.trim(), priority: +tPrio.value, due_date: tDue.value || null }); tIn.value = ''; tDue.value = ''; drawTodos(await api('/model/' + id + '/todos')); loadOverview(); };
   tIn.addEventListener('keydown', e => { if (e.key === 'Enter') addTodo(); });
   drawTodos(d.todos || []);
-  body.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Todos'),
+  body.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Aufgaben'),
     el('div', { class: 'bd' }, el('div', { class: 'row' }, tIn, tPrio, tDue, el('button', { class: 'btn primary sm', onclick: addTodo }, '+')), tl)));
 
   body.append(el('div', { class: 'card' }, el('div', { class: 'bd' },
-    el('button', { class: 'btn ghost sm', onclick: async () => { if (!confirm('Geplantes Produkt löschen?')) return; await api('/products/' + id, { method: 'DELETE' }); closeDrawer(); await loadOverview(); renderPipeline(); } }, 'Geplantes Produkt löschen'))));
-}
-
-// ============ ÄNDERUNGEN ============
-async function renderEvents() {
-  if (!STATE.overview) await loadOverview();
-  const evs = await api('/events');
-  const byId = Object.fromEntries(STATE.overview.models.map(m => [m.design_id, m.title]));
-  const w = pagehead('Änderungs-Historie', 'Alle erfassten Upload-Änderungen chronologisch. Einträge pro Modell im Detail.');
-  const list = el('ul', { class: 'timeline' });
-  if (!evs.length) list.append(el('li', { class: 'muted' }, 'Noch keine Einträge — im Modell-Detail eintragen.'));
-  evs.forEach(ev => list.append(el('li', {},
-    el('span', { class: 'date' }, ev.date), el('span', { class: 'pill' }, ev.type || 'other'),
-    el('div', { style: 'flex:1' }, el('b', {}, ev.title || '(ohne Titel)'), el('div', { class: 'muted' }, (ev.design_id ? (byId[ev.design_id] || ev.design_id) : 'Global') + (ev.note ? ' — ' + ev.note : ''))),
-    ev.design_id ? el('a', { onclick: () => openModel(ev.design_id) }, 'öffnen') : null)));
-  w.append(el('div', { class: 'card' }, el('div', { class: 'bd' }, list)));
+    el('button', { class: 'btn ghost sm', onclick: async () => { await delWithUndo('/products/' + id, 'Geplantes Modell', async () => { await loadOverview(); renderPipeline(); }); closeDrawer(); await loadOverview(); renderPipeline(); } }, 'Geplantes Modell löschen'))));
 }
 
 // ============ MODELL-DETAIL (Drawer) ============
@@ -770,7 +853,7 @@ async function openModel(id) {
   inner.append(el('div', { class: 'dh' },
     cover ? el('img', { src: cover, onerror: e => e.target.remove() }) : null,
     el('div', { style: 'flex:1' }, el('h1', {}, m.title || id),
-      el('div', { class: 'muted' }, `${m.publish_date ? 'Release ' + m.publish_date + ' · ' : ''}${m.mw_update_time ? 'zuletzt bearbeitet ' + m.mw_update_time.slice(0, 10) + ' · ' : ''}ID ${id} · ${m.category || '—'} · `,
+      el('div', { class: 'muted' }, `${m.publish_date ? 'Release ' + dmy(m.publish_date) + ' · ' : ''}${m.mw_update_time ? 'zuletzt bearbeitet ' + dmy(m.mw_update_time.slice(0, 10)) + ' · ' : ''}ID ${id} · ${m.category || '—'} · `,
         el('a', { href: m.url || `https://makerworld.com/en/models/${id}`, target: '_blank' }, 'MakerWorld ↗')),
       el('div', { class: 'tags' }, (m.tags || []).map(tt => el('span', { class: 'pill' }, tt)))),
     el('div', { class: 'row', style: 'margin:0;align-items:center' }, el('label', {}, 'Status'), statusSel),
@@ -782,7 +865,7 @@ async function openModel(id) {
   const kp = [['view','Views'],['impression','Impr'],['download','DL'],['print','Drucke'],['collect','Gesammelt'],['like','Likes'],['point','Punkte'],['boost','Boost']];
   const strip = el('div', { class: 'stats' });
   kp.forEach(([k, l]) => strip.append(el('div', { class: 'stat' }, el('div', { class: 'v' }, fmt(snap[k])), el('div', { class: 'l' }, l))));
-  strip.append(el('div', { class: 'stat' }, el('div', { class: 'v pos' }, eur((snap.point || 0) * rate())), el('div', { class: 'l' }, 'Verdient (Lifetime)')));
+  strip.append(el('div', { class: 'stat' }, el('div', { class: 'v pos' }, eur((snap.point || 0) * rate())), el('div', { class: 'l' }, 'Verdient gesamt')));
   strip.append(el('div', { class: 'stat' }, el('div', { class: 'v' }, snap.ctr_pct != null ? fmt1(snap.ctr_pct) + '%' : '–'), el('div', { class: 'l' }, 'CTR')));
   strip.append(el('div', { class: 'stat' }, el('div', { class: 'v' }, fmt(snap.comment_count)), el('div', { class: 'l' }, 'Kommentare')));
   strip.append(el('div', { class: 'stat' }, el('div', { class: 'v' }, fmt(m.dl30)), el('div', { class: 'l' }, 'DL · 30T'), el('div', { class: 'd ' + (m.v_trend > 0 ? 'pos' : m.v_trend < 0 ? 'neg' : 'muted') }, m.v_trend != null ? (m.v_trend > 0 ? '+' : '') + m.v_trend + '% Views' : '')));
@@ -829,7 +912,7 @@ async function openModel(id) {
   body.append(el('div', { class: 'grid2' }, left, right));
 
   // Notizen (autosave)
-  const notesTa = el('textarea', { style: 'width:100%;height:120px', placeholder: 'Notizen zu diesem Produkt …' }, m.notes || '');
+  const notesTa = el('textarea', { style: 'width:100%;height:120px', placeholder: 'Notizen zu diesem Modell …' }, m.notes || '');
   let noteTimer;
   const saveNote = () => { clearTimeout(noteTimer); noteTimer = setTimeout(() => jpost('/model/' + id + '/notes', { notes: notesTa.value }, 'PUT').then(() => flash(noteHd)), 600); };
   notesTa.addEventListener('input', saveNote);
@@ -839,21 +922,21 @@ async function openModel(id) {
   // Todos
   const tl = el('ul', { class: 'todolist' });
   const drawTodos = (todos) => { tl.innerHTML = ''; if (!todos.length) tl.append(el('li', { class: 'muted' }, 'Keine Aufgaben.'));
-    todos.forEach(tdo => tl.append(todoRow(tdo, async () => { const nd = await api('/model/' + id); drawTodos(nd.todos); }))); };
+    todos.forEach(tdo => tl.append(todoRow(tdo, async () => { drawTodos(await api('/model/' + id + '/todos')); }))); };
   const tIn = el('input', { placeholder: 'Aufgabe …', style: 'flex:1' });
   const tPrio = el('select', {}, [['1','normal'],['2','hoch'],['0','niedrig']].map(([v, l]) => el('option', { value: v }, l)));
   const tDue = el('input', { type: 'date' });
-  const addTodo = async () => { if (!tIn.value.trim()) return; await jpost('/todos', { design_id: id, title: tIn.value.trim(), priority: +tPrio.value, due_date: tDue.value || null }); tIn.value = ''; tDue.value = ''; const nd = await api('/model/' + id); drawTodos(nd.todos); await loadOverview(); };
+  const addTodo = async () => { if (!tIn.value.trim()) return; await jpost('/todos', { design_id: id, title: tIn.value.trim(), priority: +tPrio.value, due_date: tDue.value || null }); tIn.value = ''; tDue.value = ''; drawTodos(await api('/model/' + id + '/todos')); await loadOverview(); };
   tIn.addEventListener('keydown', e => { if (e.key === 'Enter') addTodo(); });
   drawTodos(d.todos || []);
-  left.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Todos'),
+  left.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Aufgaben'),
     el('div', { class: 'bd' }, el('div', { class: 'row' }, tIn, tPrio, tDue, el('button', { class: 'btn primary sm', onclick: addTodo }, '+')), tl)));
 
   // Ziele & Gruppe
   const gDl = el('input', { type: 'number', value: m.goal_download || '', placeholder: 'DL', style: 'width:90px' });
   const gView = el('input', { type: 'number', value: m.goal_view || '', placeholder: 'Views', style: 'width:90px' });
   const gPt = el('input', { type: 'number', value: m.goal_point || '', placeholder: 'Punkte', style: 'width:90px' });
-  const gGrp = el('input', { value: m.group_label || '', placeholder: 'z.B. Bierdeckel', style: 'width:140px' });
+  const gGrp = el('input', { value: m.group_label || '', placeholder: 'z.B. Untersetzer', style: 'width:140px' });
   const goalWrap = el('div');
   const drawGoals = () => { goalWrap.innerHTML = '';
     const bar = (val, goal, label) => { if (!goal) return null; const p = Math.min(100, Math.round((val / goal) * 100));
@@ -875,7 +958,7 @@ async function openModel(id) {
     el('div', { class: 'bd' }, el('div', { class: 'row' }, el('label', {}, 'DL'), gDl, el('label', {}, 'Views'), gView, el('label', {}, 'Punkte'), gPt),
       el('div', { class: 'row' }, el('label', {}, 'Gruppe'), gGrp, el('button', { class: 'btn sm', onclick: saveGoals }, 'Speichern')), goalWrap)));
 
-  // Traffic-Quellen als Donut (Lifetime) + Conversion-Funnel
+  // Traffic-Quellen als Donut (gesamt) + Conversion-Funnel
   if (d.traffic && d.traffic.length) {
     const lt = d.traffic.find(t => t.window === 'lifetime') || d.traffic[0];
     right.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Quelle des Datenverkehrs'),
@@ -914,7 +997,7 @@ async function openModel(id) {
     if (!ci.impacts.length) { bd.append(el('span', { class: 'muted' }, 'Änderungen an Titelbild, Titel, Tags oder Beschreibung werden beim Pull automatisch erkannt — danach steht hier CTR & Impressionen vorher/nachher (±' + ci.win + ' Tage).')); return; }
     const tb = el('table', {}, el('thead', {}, el('tr', {}, ['Datum','Änderung','CTR vorher','CTR nachher','Δ','Impr./Tag v→n','DL v→n'].map((h, i) => el('th', { class: i ? 'n' : '' }, h)))),
       el('tbody', {}, ci.impacts.map(im => el('tr', {},
-        el('td', {}, im.date), el('td', {}, TLBL[im.type] || im.type),
+        el('td', {}, dmy(im.date)), el('td', {}, TLBL[im.type] || im.type),
         el('td', { class: 'n' }, im.before.ctr != null ? fmt1(im.before.ctr) + '%' : '–'),
         el('td', { class: 'n' }, im.after.ctr != null ? fmt1(im.after.ctr) + '%' : '–'),
         im.delta == null ? el('td', { class: 'n muted' }, '–') : el('td', { class: 'n ' + (im.delta > 0 ? 'pos' : im.delta < 0 ? 'neg' : '') }, (im.delta > 0 ? '+' : '') + fmt1(im.delta)),
@@ -946,7 +1029,7 @@ function closeDrawer() { $('#drawer').classList.add('hidden'); if (detailChart) 
 // Traffic-Quellen als Donut (wie im MakerWorld Creator Center).
 let donutChart = null;
 function trafficDonut(lt, views, id) {
-  const SRC = [['recommend','Empfehlen','#3fb950'],['search','Suchen','#2f81f7'],['browse','Durchsuchen','#f85149'],['direct','Direkte URL','#e3a008'],['other','Andere','#a371f7']];
+  const SRC = [['recommend','Empfehlen','#1a7f37'],['search','Suchen','#1f5c8f'],['browse','Durchsuchen','#b4620a'],['direct','Direkte URL','#6b4fa1'],['other','Andere','#6b7280']];
   const cid = 'donut_' + id;
   const box = el('div', { class: 'donutbox' }, el('canvas', { id: cid }),
     el('div', { class: 'donutctr' }, el('div', { class: 'v' }, fmt(views)), el('div', { class: 'l' }, 'Aufrufe')));
@@ -977,11 +1060,11 @@ function funnelCard(id, snap, daily) {
     const label = metric === 'download' ? 'Downloads' : 'Drucke';
     fnl.innerHTML = '';
     fnl.append(
-      el('div', { class: 'fstage', style: 'width:100%;background:#e3a008' }, 'Eindrücke', el('b', {}, fmt(imp))),
+      el('div', { class: 'fstage', style: 'width:100%;background:#6b7280' }, 'Eindrücke', el('b', {}, fmt(imp))),
       el('div', { class: 'fconv' }, `▼ ${fmt1(c1)} %  (Eindrücke → Aufrufe)`),
-      el('div', { class: 'fstage', style: 'width:64%;background:#3fb950' }, 'Aufrufe', el('b', {}, fmt(view))),
+      el('div', { class: 'fstage', style: 'width:64%;background:#1f5c8f' }, 'Aufrufe', el('b', {}, fmt(view))),
       el('div', { class: 'fconv' }, `▼ ${fmt1(c2)} %  (Aufrufe → ${label})`),
-      el('div', { class: 'fstage', style: 'width:42%;background:#2f81f7' }, label, el('b', {}, fmt(out))));
+      el('div', { class: 'fstage', style: 'width:42%;background:#1a7f37' }, label, el('b', {}, fmt(out))));
   };
   const rangeSel = el('select', { class: 'sm' }, [['gesamt','Gesamt'],['365','1 Jahr'],['30','1 Monat']].map(([v, l]) => el('option', { value: v }, l)));
   rangeSel.onchange = () => { range = rangeSel.value; render(); };
@@ -992,14 +1075,15 @@ function funnelCard(id, snap, daily) {
     el('span', { class: 'row', style: 'margin:0' }, rangeSel, metSel)), el('div', { class: 'bd' }, fnl));
 }
 $('#drawer').addEventListener('click', e => { if (e.target.id === 'drawer') closeDrawer(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#drawer').classList.contains('hidden')) closeDrawer(); });
 function flash(node) { node.textContent = '✓ gespeichert'; node.classList.add('pos'); setTimeout(() => { node.textContent = ''; node.classList.remove('pos'); }, 1500); }
 
 function renderEventEditor(design_id, events) {
   const list = el('ul', { class: 'timeline' });
   const draw = evs => { list.innerHTML = ''; if (!evs.length) list.append(el('li', { class: 'muted' }, 'Noch keine Änderungen erfasst.'));
-    evs.forEach(ev => list.append(el('li', {}, el('span', { class: 'date' }, ev.date), el('span', { class: 'pill' }, ev.type || 'other'),
+    evs.forEach(ev => list.append(el('li', {}, el('span', { class: 'date' }, dmy(ev.date)), el('span', { class: 'pill' }, ev.type || 'other'),
       el('div', { style: 'flex:1' }, el('b', {}, ev.title || '(ohne Titel)'), ev.note ? el('div', { class: 'muted' }, ev.note) : null),
-      el('button', { class: 'btn sm ghost', onclick: async () => { await api('/events/' + ev.id, { method: 'DELETE' }); draw(evs = evs.filter(x => x.id !== ev.id)); } }, '✕')))); };
+      el('button', { class: 'btn sm ghost', onclick: async () => { await delWithUndo('/events/' + ev.id, 'Eintrag', async () => { const nd = await api('/events?design_id=' + design_id); events.splice(0, events.length, ...nd); draw(events); }); draw(evs = evs.filter(x => x.id !== ev.id)); } }, '✕')))); };
   draw(events);
   const dateI = el('input', { type: 'date', value: today() });
   const typeI = el('select', {}, ['thumbnail','title','description','tags','price','files','other'].map(t => el('option', { value: t }, t)));
@@ -1017,6 +1101,11 @@ async function renderHeute() {
   const d = await api('/today');
   const w = pagehead('Heute', 'Tagesübersicht: offene Zahlungen, fällige Aufgaben, Hinweise und Änderungen.');
   const tile = (v, l, cls) => el('div', { class: 'stat' }, el('div', { class: 'v ' + (cls || '') }, fmt(v)), el('div', { class: 'l' }, l));
+  if (d.issues && d.issues.length) {   // Systemhinweise nur, wenn etwas nicht stimmt
+    const bx = el('div', { class: 'card issues' }, el('div', { class: 'hd' }, 'Systemhinweise', el('a', { onclick: () => go('data'), style: 'font-weight:400;text-transform:none;font-size:11px' }, 'Details →')));
+    d.issues.forEach(i => bx.append(el('div', { class: 'issue ' + i.level }, i.text)));
+    w.append(bx);
+  }
   w.append(el('div', { class: 'stats' },
     tile(d.counts.payments, 'offene Zahlungen', d.counts.payments ? 'neg' : ''),
     tile(d.counts.due, 'überfällige Aufgaben', d.counts.due ? 'neg' : ''),
@@ -1034,7 +1123,7 @@ async function renderHeute() {
   if (Array.isArray(ms) && ms.length) {
     const bd = el('div', { class: 'bd' });
     ms.slice(0, 6).forEach(m => bd.append(el('div', { class: 'checkline', style: m.design_id ? 'cursor:pointer' : '', onclick: () => m.design_id && openModel(m.design_id) },
-      el('span', { class: 'muted' }, '•'), el('span', { style: 'flex:1' }, m.title), el('span', { class: 'muted num', style: 'font-size:11px' }, m.date))));
+      el('span', { class: 'muted' }, '•'), el('span', { style: 'flex:1' }, m.title), el('span', { class: 'muted num', style: 'font-size:11px' }, dmy(m.date)))));
     w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Meilensteine'), bd));
   }
 
@@ -1054,10 +1143,10 @@ async function renderHeute() {
 
   if (d.alerts.length) { const al = el('div', { class: 'alerts' });
     d.alerts.forEach(a => al.append(el('div', { class: 'alert', onclick: () => a.design_id && openModel(a.design_id) },
-      el('span', { class: 'tag ' + a.type }, a.type), el('b', {}, a.title || 'Global'), el('span', { class: 'muted' }, '— ' + a.text))));
+      el('span', { class: 'tag ' + a.type }, ALERT_LABELS[a.type] || a.type), el('b', {}, a.title || 'Global'), el('span', { class: 'muted' }, '— ' + a.text))));
     w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, `Alerts (${d.alerts.length})`), al)); }
   if (d.recentChanges.length) { const list = el('ul', { class: 'timeline' });
-    d.recentChanges.forEach(c => list.append(el('li', {}, el('span', { class: 'date' }, c.date), el('span', { class: 'pill' }, c.type),
+    d.recentChanges.forEach(c => list.append(el('li', {}, el('span', { class: 'date' }, dmy(c.date)), el('span', { class: 'pill' }, c.type),
       el('div', { style: 'flex:1' }, el('b', {}, c.model_title || ''), c.note ? el('div', { class: 'muted' }, c.note) : null),
       c.design_id ? el('a', { onclick: () => openModel(c.design_id) }, 'öffnen') : null)));
     w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Änderungen (letzte 3 Tage)'), el('div', { class: 'bd' }, list))); }
@@ -1084,13 +1173,14 @@ function setupSearch() {
 // ---- Rechnung / Beleg (druckbar) ----
 async function openInvoice(pid) {
   const s = await api('/crm/settings'); const seller = s.seller || {};
-  if (!seller.name) { if (confirm('Kein Rechnungs-Absender hinterlegt. Jetzt unter Finanzen eintragen?')) { closeDrawer(); go('revenue'); } return; }
+  if (!seller.name) { if (await askConfirm('Kein Rechnungs-Absender hinterlegt', 'Der Absender gehört auf die Rechnung. Jetzt unter Finanzen eintragen?', 'Zu Finanzen')) { closeDrawer(); go('revenue'); } return; }
   const p = await api('/project/' + pid);
   const c = p.contact_id ? await api('/contact/' + p.contact_id).then(x => x.contact) : {};
-  const num = (await jpost('/crm/invoice-number', {})).number;
+  const inv = await jpost('/crm/projects/' + pid + '/invoice-number', {});   // je Projekt stabil, verbraucht beim erneuten Öffnen keine Nummer
+  const num = inv.number;
   const qty = p.qty || 1; const total = p.calc?.price || 0; const unit = qty ? total / qty : total;
-  const esc = x => String(x || '').replace(/[<>&]/g, m => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[m]));
-  const dt = new Date().toLocaleDateString('de-DE');
+  const esc = x => String(x || '').replace(/[<>&"']/g, m => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' }[m]));
+  const dt = dmy(inv.date || today());
   const custName = c.name || p.contact_name || '';
   // Druckpositionen (falls vorhanden) als Detailzeilen unter der Hauptposition.
   const posLines = (p.items || []).map(it => `<div class=detail>• ${esc(it.label || it.model_title || 'Position')} — ${it.qty}×</div>`).join('');
@@ -1125,11 +1215,10 @@ async function openInvoice(pid) {
 const CONTACT_STAGES = [['neu','Neu'],['kontaktiert','Kontaktiert'],['angebot','Angebot'],['gewonnen','Gewonnen'],['verloren','Verloren']];
 const STAGE_COLOR = { neu: '#6b7280', kontaktiert: '#1f5c8f', angebot: '#9a6a00', gewonnen: '#1a7f37', verloren: '#c1332d' };
 const SOURCES = [['makerworld','MakerWorld'],['freund','Freund'],['empfehlung','Empfehlung'],['manuell','Manuell']];
-const ORDER_STATUS = [['angefragt','Angefragt'],['bestaetigt','Bestätigt'],['produktion','Produktion'],['versendet','Versendet'],['bezahlt','Bezahlt'],['storniert','Storniert']];
-const OSTATUS_COLOR = { angefragt: '#6b7280', bestaetigt: '#1f5c8f', produktion: '#9a6a00', versendet: '#0e7490', bezahlt: '#1a7f37', storniert: '#c1332d' };
-const PROJECT_STATUS = [['offen','Offen'],['in_arbeit','In Arbeit'],['fertig','Fertig'],['abgebrochen','Abgebrochen']];
-const PROJECT_STAGES = [['anfrage','Anfrage'],['modellierung','Modellieren'],['druck','Drucken'],['fertig','Fertig'],['abgebrochen','Abgebrochen']];
-const PSTAGE_COLOR = { anfrage: '#6b7280', modellierung: '#9a6a00', druck: '#1f5c8f', fertig: '#1a7f37', abgebrochen: '#c1332d' };
+const PROJECT_STAGES = [['anfrage','Anfrage'],['modellierung','Modellieren'],['druck','Drucken'],['fertig','Fertig'],['abgebrochen','Abgebrochen'],['ausgeliefert','Ausgeliefert / Archiviert']];
+const PSTAGE_COLOR = { anfrage: '#6b7280', modellierung: '#9a6a00', druck: '#1f5c8f', fertig: '#1a7f37', abgebrochen: '#c1332d', ausgeliefert: '#4b5563' };
+// beglichen = bezahlt oder kostenlos; Voraussetzung für "ausgeliefert"/archiviert.
+const isSettled = p => !!p.paid || p.margin_tier === 'kostenlos' || (p.price != null && p.price <= 0);
 // Eigenprojekte (kein Kunde): eigener Produktions-Workflow bis zur Veröffentlichung.
 const SELF_STAGES = [['idee','Idee'],['modellierung','Modellieren'],['druck','Drucken'],['fotos','Fotos'],['eintrag','MW-Eintrag'],['publish','Veröffentlicht'],['abgebrochen','Abgebrochen']];
 const SSTAGE_COLOR = { idee: '#6b7280', modellierung: '#9a6a00', druck: '#1f5c8f', fotos: '#0e7490', eintrag: '#7c3aed', publish: '#1a7f37', abgebrochen: '#c1332d' };
@@ -1151,7 +1240,7 @@ const labelOf = (arr, v) => (arr.find(x => x[0] === v) || [v, v])[1];
 const mkSelect = (opts, val, cls) => { const s = el('select', cls ? { class: cls } : {}, opts.map(([v, l]) => el('option', { value: v }, l))); s.value = val; return s; };
 function modelSelect(value) { const s = el('select', {}, el('option', { value: '' }, '— Modell (optional) —'),
   (STATE.overview?.models || []).map(m => el('option', { value: m.design_id }, (m.title || m.design_id).slice(0, 44)))); s.value = value || ''; return s; }
-async function newContact() { const name = prompt('Name des Kunden/Leads:'); if (!name || !name.trim()) return;
+async function newContact() { const name = await askText({ title: 'Neuer Kunde / Lead', placeholder: 'Name', okText: 'Anlegen' }); if (!name || !name.trim()) return;
   const c = await jpost('/contacts', { name: name.trim(), source: 'manuell' }); openContact(c.id); }
 
 // ---- Kundenliste ----
@@ -1163,7 +1252,7 @@ async function renderContacts() {
     el('span', { class: 'muted' }, `${list.length} Kontakte · Klick = Details`)));
   if (!list.length) { w.append(el('div', { class: 'card' }, el('div', { class: 'bd muted' }, 'Noch keine Kontakte. Lege oben deinen ersten Kunden/Lead an.'))); return; }
   const wrap = el('div', { class: 'tablewrap' }); w.append(wrap);
-  const cols = [['Name'],['Quelle'],['Stufe'],['Projekte'],['Best.'],['Umsatz'],['bezahlt'],['letzte Best.']];
+  const cols = [['Name'],['Quelle'],['Stufe'],['Projekte'],['Umsatz'],['bezahlt'],['offen'],['letztes Projekt']];
   wrap.append(el('table', {},
     el('thead', {}, el('tr', {}, cols.map(([l], i) => el('th', { class: i ? 'n' : '' }, l)))),
     el('tbody', {}, list.map(c => el('tr', { onclick: () => openContact(c.id) },
@@ -1171,10 +1260,10 @@ async function renderContacts() {
       el('td', {}, labelOf(SOURCES, c.source)),
       el('td', {}, el('span', { class: 'tag', style: `background:${STAGE_COLOR[c.stage] || '#6b7280'}` }, labelOf(CONTACT_STAGES, c.stage))),
       el('td', { class: 'n' }, fmt(c.project_count)),
-      el('td', { class: 'n' }, fmt(c.order_count)),
-      el('td', { class: 'n' }, eur(c.order_total)),
+      el('td', { class: 'n' }, eur(c.revenue_total)),
       el('td', { class: 'n pos' }, eur(c.revenue_paid)),
-      el('td', { class: 'n muted' }, c.last_order || '–'))))));
+      el('td', { class: 'n' + (c.revenue_open > 0 ? ' neg' : ' muted') }, eur(c.revenue_open)),
+      el('td', { class: 'n muted' }, dmy(c.last_project)))))));
 }
 
 // ---- Kunden-Detail (Drawer) ----
@@ -1214,7 +1303,7 @@ async function openContact(id) {
       row('Handle', 'mw_handle'), row('E-Mail', 'email'), row('Telefon', 'phone'),
       el('div', { class: 'row' }, el('label', { style: 'min-width:70px' }, 'Tags'), f.tags),
       notesTa, el('div', { class: 'row' }, el('button', { class: 'btn sm', onclick: saveC }, 'Speichern'),
-        el('button', { class: 'btn sm ghost', onclick: async () => { if (!confirm('Kunde inkl. Projekte & Bestellungen löschen?')) return; await api('/contacts/' + id, { method: 'DELETE' }); closeDrawer(); renderContacts(); } }, 'Kunde löschen')))));
+        el('button', { class: 'btn sm ghost', onclick: async () => { await delWithUndo('/contacts/' + id, 'Kunde inkl. Projekten', () => renderContacts()); closeDrawer(); renderContacts(); } }, 'Kunde löschen')))));
 
   const reload = async () => { const nd = await api('/contact/' + id); drawProjects(nd.projects); drawTodos(nd.todos || []); };
 
@@ -1227,7 +1316,7 @@ async function openContact(id) {
         el('span', { style: 'flex:1' }, el('b', {}, p.title), p.model_title ? el('span', { class: 'muted' }, ' · ' + p.model_title) : ''),
         el('span', { class: 'muted num', style: 'font-size:11px' }, `Kosten ${eur(c.cost)}`),
         el('span', { class: 'num', style: 'font-weight:600' }, c.free ? el('span', { class: 'neg' }, 'gratis') : eur(c.price)),
-        el('button', { class: 'btn sm ghost', onclick: async e => { e.stopPropagation(); if (!confirm('Projekt löschen?')) return; await api('/projects/' + p.id, { method: 'DELETE' }); reload(); } }, '✕'))); }); };
+        el('button', { class: 'btn sm ghost', onclick: async e => { e.stopPropagation(); await delWithUndo('/projects/' + p.id, 'Projekt', reload); reload(); } }, '✕'))); }); };
   drawProjects(d.projects);
   const pTitle = el('input', { placeholder: 'Neues Projekt …', style: 'flex:1' }); const pModel = modelSelect();
   const pKind = mkSelect([['modell_print', 'Modell + Druck'], ['modell', 'nur Modellarbeit']], 'modell_print');
@@ -1265,7 +1354,7 @@ async function renderLeads() {
       sel.onchange = async e => { e.stopPropagation(); await jpost('/contacts/' + c.id, { stage: sel.value }, 'PUT'); renderLeads(); };
       const card = el('div', { class: 'kcard', onclick: () => openContact(c.id) },
         el('div', { class: 'kt' }, c.name),
-        el('div', { class: 'muted', style: 'font-size:11px' }, `${labelOf(SOURCES, c.source)} · ${c.order_count} Best. · ${eur(c.order_total)}`), sel);
+        el('div', { class: 'muted', style: 'font-size:11px' }, `${labelOf(SOURCES, c.source)} · ${c.project_count} Proj. · ${eur(c.revenue_total)}`), sel);
       dndCard(card, c.id);
       col.append(card);
     });
@@ -1294,34 +1383,30 @@ async function renderRevenue() {
       el('div', { class: 'stat' }, el('div', { class: 'v pos' }, eur(ps.mwFromProjects)), el('div', { class: 'l' }, 'MakerWorld-Ertrag'), el('div', { class: 'd muted' }, 'aus verknüpften Modellen')),
       el('div', { class: 'stat', style: 'border-left:2px solid var(--accent)' }, el('div', { class: 'v ' + (ps.grandTotal >= 0 ? 'pos' : 'neg') }, eur(ps.grandTotal)), el('div', { class: 'l' }, 'Gesamtbilanz'), el('div', { class: 'd muted' }, 'direkt − Material + MW')),
       el('div', { class: 'stat' }, el('div', { class: 'v neg' }, eur(ps.loss)), el('div', { class: 'l' }, 'Verlust (Gratis)'), el('div', { class: 'd muted' }, ps.freeCount + ' kostenlos'))))));
-  if (d.freeButEarning && d.freeButEarning.length) {
-    const wrap = el('div', { class: 'tablewrap' });
-    wrap.append(el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Gratis-Projekt'), el('th', {}, 'Kunde'), el('th', {}, 'Modell'), el('th', { class: 'n' }, 'MakerWorld €'), el('th', { class: 'n' }, 'netto'))),
-      el('tbody', {}, d.freeButEarning.map(p => el('tr', { onclick: () => openProject(p.id) },
-        el('td', { class: 'title' }, p.title), el('td', {}, p.contact_name),
-        el('td', {}, p.model_title || '–'), el('td', { class: 'n pos' }, eur(p.mwEarned)),
-        el('td', { class: 'n ' + (p.net >= 0 ? 'pos' : 'neg') }, eur(p.net)))))));
-    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Gratis-Projekte, die auf MakerWorld verdienen'),
-      el('div', { class: 'bd muted', style: 'padding-bottom:0' }, 'Kostenlos modelliert — aber das hochgeladene Modell bringt über Punkte/Downloads Geld ein.'), wrap));
-  }
   // Projekte, deren Modell auf MakerWorld Geld/Credits macht ("hat sich gelohnt?")
   if (d.projectModels && d.projectModels.length) {
-    const wrap = el('div', { class: 'tablewrap' });
-    wrap.append(el('table', {}, el('thead', {}, el('tr', {},
-      el('th', {}, 'Projekt'), el('th', {}, 'Kunde'), el('th', {}, 'Modell'),
-      el('th', { class: 'n' }, 'Downloads'), el('th', { class: 'n' }, 'Punkte'),
-      el('th', { class: 'n' }, 'MakerWorld €'), el('th', { class: 'n' }, 'netto'))),
-      el('tbody', {}, d.projectModels.map(r => el('tr', {},
+    // Eine Tabelle; "nur Gratis-Projekte" zeigt die kostenlos modellierten, die trotzdem verdienen.
+    let onlyFree = false;
+    const tbody = el('tbody');
+    const drawPM = () => { tbody.innerHTML = '';
+      d.projectModels.filter(r => !onlyFree || r.free).forEach(r => tbody.append(el('tr', r.counted ? {} : { class: 'muted', title: 'Dieses Modell ist oben bereits gezählt (mehrere Projekte nutzen dasselbe Modell) und geht nicht in die Summe ein.' },
         el('td', { class: 'title', style: 'cursor:pointer', onclick: () => openProject(r.project_id) }, r.title,
           r.free ? el('span', { class: 'tag', style: 'background:#9a6a00;margin-left:6px' }, 'gratis') : (r.paid ? el('span', { class: 'tag', style: 'background:#1a7f37;margin-left:6px' }, eur(r.price)) : '')),
         el('td', {}, r.contact_name),
         el('td', { style: 'cursor:pointer', onclick: () => openModel(r.design_id) }, r.model_title || r.design_id),
         el('td', { class: 'n' }, fmt(r.downloads)), el('td', { class: 'n' }, fmt(r.points)),
-        el('td', { class: 'n pos' }, eur(r.mwEarned)),
-        el('td', { class: 'n ' + (r.net >= 0 ? 'pos' : 'neg') }, eur(r.net)))))));
+        el('td', { class: 'n ' + (r.counted ? 'pos' : 'muted') }, eur(r.mwEarned) + (r.counted ? '' : ' *')),
+        el('td', { class: 'n ' + (r.net >= 0 ? 'pos' : 'neg') }, eur(r.net))))); };
+    drawPM();
+    const wrap = el('div', { class: 'tablewrap' }, el('table', {}, el('thead', {}, el('tr', {},
+      el('th', {}, 'Projekt'), el('th', {}, 'Kunde'), el('th', {}, 'Modell'),
+      el('th', { class: 'n' }, 'Downloads'), el('th', { class: 'n' }, 'Punkte'),
+      el('th', { class: 'n' }, 'MakerWorld €'), el('th', { class: 'n' }, 'netto'))), tbody));
+    const freeCb = el('input', { type: 'checkbox' }); freeCb.onchange = () => { onlyFree = freeCb.checked; drawPM(); };
     w.append(el('div', { class: 'card' },
-      el('div', { class: 'hd' }, 'Projekte → MakerWorld-Ertrag', el('span', { class: 'muted', style: 'font-weight:400;text-transform:none' }, t('Summe') + ' ' + eur(d.projectModelsTotal))),
-      el('div', { class: 'bd muted', style: 'padding-bottom:0' }, 'Privat entstandene Projekte, deren hochgeladenes Modell danach über Downloads/Punkte Geld einbringt. „netto" = MakerWorld-Ertrag − Materialeinsatz des Projekts.'), wrap));
+      el('div', { class: 'hd' }, 'Projekte → MakerWorld-Ertrag', el('span', { class: 'row', style: 'margin:0;font-weight:400;text-transform:none' },
+        el('label', { class: 'checkline' }, freeCb, 'nur Gratis-Projekte'), el('span', { class: 'muted' }, t('Summe') + ' ' + eur(d.projectModelsTotal)))),
+      el('div', { class: 'bd muted', style: 'padding-bottom:0' }, 'Privat entstandene Projekte, deren hochgeladenes Modell danach über Downloads/Punkte Geld einbringt. „netto" = MakerWorld-Ertrag − Materialeinsatz des Projekts. Zeilen mit * nutzen ein Modell, das weiter oben schon gezählt ist, und gehen nicht in die Summe ein. Gratis-Projekte: kostenlos modelliert, aber das Modell verdient über Punkte.'), wrap));
   }
   if (d.monthly && d.monthly.length) {
     w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Monatsumsatz (bezahlt)'), el('div', { class: 'bd' }, el('div', { class: 'chartbox', style: 'height:200px' }, el('canvas', { id: 'revChart' })))));
@@ -1356,8 +1441,8 @@ async function renderRevenue() {
   const exWrap = el('div');
   const drawEx = async () => { const list = await api('/expenses'); exWrap.innerHTML = '';
     exWrap.append(el('div', { class: 'tablewrap' }, el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Datum'), el('th', {}, 'Kategorie'), el('th', {}, 'Beschreibung'), el('th', { class: 'n' }, 'Betrag'), el('th', {}, ''))),
-      el('tbody', {}, list.length ? list.map(e => el('tr', {}, el('td', { class: 'num' }, e.date), el('td', {}, labelOf(EXP_CAT, e.category)), el('td', {}, e.description || '–'), el('td', { class: 'n neg' }, eur(e.amount)),
-        el('td', {}, el('button', { class: 'btn sm ghost', onclick: async () => { await api('/expenses/' + e.id, { method: 'DELETE' }); drawEx(); } }, '✕'))))
+      el('tbody', {}, list.length ? list.map(e => el('tr', {}, el('td', { class: 'num' }, dmy(e.date)), el('td', {}, labelOf(EXP_CAT, e.category)), el('td', {}, e.description || '–'), el('td', { class: 'n neg' }, eur(e.amount)),
+        el('td', {}, el('button', { class: 'btn sm ghost', onclick: async () => { await delWithUndo('/expenses/' + e.id, 'Ausgabe', () => renderRevenue()); renderRevenue(); } }, '✕'))))
         : [el('tr', {}, el('td', { class: 'muted' }, 'Keine Ausgaben.'))])))); };
   await drawEx();
   const exDate = el('input', { type: 'date', value: today() }); const exCat = mkSelect(EXP_CAT, 'filament');
@@ -1370,8 +1455,8 @@ async function renderRevenue() {
   const poWrap = el('div');
   const drawPo = async () => { const list = await api('/payouts'); poWrap.innerHTML = '';
     poWrap.append(el('div', { class: 'tablewrap' }, el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, 'Datum'), el('th', { class: 'n' }, 'Punkte'), el('th', { class: 'n' }, 'Betrag'), el('th', {}, 'Notiz'), el('th', {}, ''))),
-      el('tbody', {}, list.length ? list.map(o => el('tr', {}, el('td', { class: 'num' }, o.date), el('td', { class: 'n' }, fmt(o.points)), el('td', { class: 'n pos' }, eur(o.amount)), el('td', {}, o.note || '–'),
-        el('td', {}, el('button', { class: 'btn sm ghost', onclick: async () => { await api('/payouts/' + o.id, { method: 'DELETE' }); drawPo(); } }, '✕'))))
+      el('tbody', {}, list.length ? list.map(o => el('tr', {}, el('td', { class: 'num' }, dmy(o.date)), el('td', { class: 'n' }, fmt(o.points)), el('td', { class: 'n pos' }, eur(o.amount)), el('td', {}, o.note || '–'),
+        el('td', {}, el('button', { class: 'btn sm ghost', onclick: async () => { await delWithUndo('/payouts/' + o.id, 'Auszahlung', () => renderRevenue()); renderRevenue(); } }, '✕'))))
         : [el('tr', {}, el('td', { class: 'muted' }, 'Keine Auszahlungen.'))])))); };
   await drawPo();
   const poDate = el('input', { type: 'date', value: today() }); const poPts = el('input', { type: 'number', value: 524, style: 'width:80px' });
@@ -1391,25 +1476,6 @@ async function renderRevenue() {
 const EXP_CAT = [['filament','Filament'],['drucker','Drucker'],['zubehoer','Zubehör'],['versand','Versand'],['sonstiges','Sonstiges']];
 
 // ---- Projekt-Kalkulation (Drawer) ----
-function calcClient(p, parts, s, items = []) {
-  const hasItems = items && items.length > 0;
-  const filamentG = hasItems ? items.reduce((a, it) => a + (+it.qty || 0) * (+it.weight_g || 0), 0) : (+p.filament_g || 0);
-  const printH = hasItems ? items.reduce((a, it) => a + (+it.qty || 0) * (+it.print_min || 0), 0) / 60 : (+p.print_hours || 0);
-  const filament = filamentG / 1000 * s.filament_price_kg;
-  const partsSum = parts.reduce((a, pp) => a + (+pp.qty || 0) * (+pp.unit_price || 0), 0);
-  const energy = printH * s.energy_rate_h;
-  const material = filament + partsSum + energy;
-  const labor = (+p.labor_hours || 0) * s.labor_rate_h;
-  const cost = material + labor;
-  const free = p.margin_tier === 'kostenlos';
-  const tier = (s.tiers || []).find(t => t.name === p.margin_tier);
-  const margin = tier ? tier.margin : ((s.tiers && s.tiers[0]?.margin) ?? 0.6);
-  const roundUp = (x, st) => st > 0 ? Math.ceil(x / st) * st : x;
-  const exclusiveFee = p.no_upload ? (+p.no_upload_fee || 0) : 0;
-  const suggestion = (free ? 0 : roundUp(cost * (1 + margin), s.round_to)) + exclusiveFee;
-  const price = (p.price != null && p.price !== '') ? +p.price : suggestion;
-  return { filament, partsSum, energy, material, labor, cost, margin, free, suggestion, price, profit: price - cost, contribution: price - material, loss: price <= 0 ? -material : 0, filamentG, printH, hasItems, exclusiveFee };
-}
 async function openProject(id) {
   const s = await api('/crm/settings');
   let full = await api('/project/' + id);
@@ -1418,21 +1484,29 @@ async function openProject(id) {
   let items = full.items || [];                   // Druckpositionen (mehrere Modelle/Profile)
   const instCache = {};                           // design_id -> instances[]
   const loadInstances = async did => { if (!did) return []; if (instCache[did]) return instCache[did];
-    try { const md = await api('/model/' + did); return instCache[did] = (md.instances || []); } catch { return instCache[did] = []; } };
+    try { return instCache[did] = (await api('/model/' + did + '/instances')); } catch { return instCache[did] = []; } };
   const inner = $('#drawer .drawer-inner'); inner.innerHTML = '';
   $('#drawer').classList.remove('hidden');
   let saveT;
   const persist = () => { clearTimeout(saveT); saveT = setTimeout(async () => {
-    await jpost('/projects/' + id, { title: p.title, stage: p.stage, design_id: p.design_id, filament_g: +p.filament_g || null,
+    const saved = await jpost('/projects/' + id, { title: p.title, stage: p.stage, design_id: p.design_id, filament_g: +p.filament_g || null,
       print_hours: +p.print_hours || null, labor_hours: +p.labor_hours || null, margin_tier: p.margin_tier,
       price: (p.price === '' || p.price == null) ? null : +p.price, paid: p.paid ? 1 : 0, qty: +p.qty || 1,
       kind: p.kind || 'modell_print', no_upload: p.no_upload ? 1 : 0, no_upload_fee: +p.no_upload_fee || 0,
       close_date: p.close_date || null, due_date: p.due_date || null, priority: p.priority ?? 1 }, 'PUT');
+    if (saved && saved.error) toast('Nicht gespeichert: ' + saved.error);
     await loadOverview();
   }, 500); };
 
   const res = el('div', { class: 'stats' });
-  const drawRes = () => { const c = calcClient(p, parts, s, items); res.innerHTML = '';
+  // Kalkulation kommt vom Server (computeProject); hier nur Anzeige. drawRes() holt nach kurzer Pause (Tippen) das Ergebnis.
+  let calc = full.calc, calcSeq = 0, calcTimer;
+  const drawRes = () => { clearTimeout(calcTimer); calcTimer = setTimeout(async () => {
+      const my = ++calcSeq;
+      const r = await jpost('/crm/calc', { project: { filament_g: p.filament_g, print_hours: p.print_hours, labor_hours: p.labor_hours, margin_tier: p.margin_tier,
+        price: p.price, no_upload: p.no_upload, no_upload_fee: p.no_upload_fee }, parts, items }).catch(() => null);
+      if (my === calcSeq && r && !r.error) { calc = r; renderRes(calc); } }, 120); };
+  const renderRes = (c) => { res.innerHTML = '';
     syncManualInputs(c);
     const mwE = p.mw?.earned || 0;
     const total = +((c.price - c.material) + mwE).toFixed(2);
@@ -1473,9 +1547,11 @@ async function openProject(id) {
   const markBtn = el('button', { class: 'btn primary sm' }, 'Stufe abschließen');
   const closeDateI = el('input', { type: 'date', value: p.close_date || '' });
   closeDateI.onchange = () => { p.close_date = closeDateI.value || null; persist(); };
-  const pathStages = () => stagesOf(p).filter(sd => sd[0] !== 'abgebrochen');
+  const pathStages = () => stagesOf(p).filter(sd => sd[0] !== 'abgebrochen' && sd[0] !== 'ausgeliefert');
   const lastStage = () => pathStages().slice(-1)[0][0];   // 'fertig' bzw. 'publish' (Eigenprojekt)
-  const setStage = (v) => { p.stage = v; stageSel.value = v; applyKind(); persist(); drawPath();
+  const setStage = (v) => {
+    if (v === 'ausgeliefert' && !isSettled(p)) { toast('Erst nach Zahlung: „Bezahlt" setzen — Ausliefern läuft über die Aufgabe.'); stageSel.value = p.stage; return; }
+    p.stage = v; stageSel.value = v; applyKind(); persist(); drawPath();
     if (v === lastStage() && !p.close_date) { p.close_date = today(); closeDateI.value = p.close_date; } };
   function drawPath() { const st = pathStages(); pathWrap.innerHTML = ''; pathWrap.append(stagePath(st, p.stage, setStage));
     const done = p.stage === lastStage(); markBtn.disabled = done; markBtn.textContent = done ? 'Abgeschlossen' : 'Stufe abschließen'; }
@@ -1485,7 +1561,7 @@ async function openProject(id) {
   prioSel.onchange = () => { p.priority = +prioSel.value; persist(); };
   const dueI = el('input', { type: 'date', value: p.due_date || '' });
   dueI.onchange = () => { p.due_date = dueI.value || null; persist(); };
-  const titleI = el('input', { value: p.title || '', style: 'font-size:14px;font-weight:600;flex:1;min-width:200px' });
+  const titleI = el('input', { value: p.title || '', 'aria-label': 'Projekttitel', style: 'font-size:14px;font-weight:600;flex:1;min-width:200px' });
   titleI.oninput = () => { p.title = titleI.value; persist(); };
   inner.append(el('div', { class: 'dh' },
     el('div', { style: 'flex:1' }, el('div', { class: 'row', style: 'margin:0 0 4px' }, titleI),
@@ -1507,18 +1583,17 @@ async function openProject(id) {
   // Eingaben
   const num = (key, label, ph, w) => { const i = el('input', { type: 'number', step: '0.01', value: p[key] ?? '', placeholder: ph, style: `width:${w || 90}px` });
     i.oninput = () => { p[key] = i.value; drawRes(); persist(); }; return el('div', { class: 'row', style: 'margin:0' }, el('label', { style: 'min-width:96px' }, label), i); };
-  const tierSel = mkSelect([...(s.tiers || []).map(t => [t.name, t.name + ' (' + Math.round(t.margin * 100) + '%)']), ['kostenlos', 'Kostenlos (nur Material)']], p.margin_tier || (s.tiers?.[0]?.name || 'Standard'));
-  tierSel.onchange = () => { p.margin_tier = tierSel.value; drawRes(); persist(); };
+  const tierSel = mkSelect([...(s.tiers || []).map(t => [t.name, t.name + ' (' + Math.round(t.margin * 100) + '%)' + (t.default ? ' – Standard' : '')]), ['kostenlos', 'Kostenlos (nur Material)']], p.margin_tier || s.default_tier || 'Standard');
+  tierSel.onchange = () => { p.margin_tier = tierSel.value; drawRes(); persist(); applyKind(); };
   const priceI = el('input', { type: 'number', step: '0.5', value: p.price ?? '', placeholder: 'Vorschlag', style: 'width:100px' });
   const priceHint = el('span', { class: 'muted', style: 'font-size:11px' });
-  priceI.oninput = () => { p.price = priceI.value; drawRes(); persist(); };
+  priceI.oninput = () => { p.price = priceI.value; drawRes(); persist(); applyKind(); };
   const refreshMw = async () => { if (!p.design_id) { p.mw = null; drawRes(); return; }
-    try { const md = await api('/model/' + p.design_id); const sn = md.snaps?.[md.snaps.length - 1] || {}; p.mw = { earned: md.model.earned ?? 0, point: sn.point ?? 0, download: sn.download ?? 0, view: sn.view ?? 0 }; } catch { p.mw = null; } drawRes(); };
+    try { p.mw = await api('/crm/model-earned/' + p.design_id); } catch { p.mw = null; } drawRes(); };
   const modelSel = modelSelect(p.design_id); modelSel.onchange = () => { p.design_id = modelSel.value || null; applyKind(); persist(); refreshMw(); };
   const fillFromModel = el('button', { class: 'btn sm ghost', title: 'Filament & Druckzeit aus dem Standard-Druckprofil (× Stückzahl)', onclick: async () => {
     if (!p.design_id) return toast('Erst ein Modell wählen.');
-    const md = await api('/model/' + p.design_id);
-    const inst = (md.instances || [])[0];
+    const inst = (await api('/model/' + p.design_id + '/instances'))[0];
     if (!inst || (!inst.weight && !inst.print_min)) return toast('Kein Druckprofil mit Gewicht/Zeit im Modell.');
     const q = +p.qty || 1; const msg = [];
     if (inst.weight) { p.filament_g = Math.round(inst.weight * q); gInput.querySelector('input').value = p.filament_g; msg.push(p.filament_g + ' g'); }
@@ -1545,7 +1620,7 @@ async function openProject(id) {
   } }, 'Vorschlag');
   const pubBtn = el('button', { class: 'btn sm', onclick: async () => {
     const r = await jpost('/crm/projects/' + id + '/publish', {}); p.design_id = r.design_id; p.published = 1; modelSel.value = r.design_id || '';
-    applyKind(); refreshMw(); await loadOverview(); toast(r.design_id?.startsWith('plan_') ? 'Als geplantes Produkt angelegt (erscheint unter Produkte)' : 'Als veröffentlicht markiert'); } },
+    applyKind(); refreshMw(); await loadOverview(); toast(r.design_id?.startsWith('plan_') ? 'Als geplantes Modell angelegt (erscheint unter Ideen & Entwürfe)' : 'Als veröffentlicht markiert'); } },
     p.published ? '✓ veröffentlicht' : '↗ MakerWorld-Upload');
   const mwRow = el('div', { class: 'row', style: 'margin:0' }, suggestBtn, pubBtn);
   // Exklusiv: Kunde zahlt Aufpreis dafür, dass das Modell NICHT hochgeladen wird
@@ -1575,8 +1650,8 @@ async function openProject(id) {
   const artRow = el('div', { class: 'row', style: 'margin:0' }, el('label', { style: 'min-width:96px' }, 'Art'), kindSel,
     el('span', { class: 'muted', style: 'font-size:11px' }, 'nur Modellarbeit = kein Druck (Statuslink ohne Druck-Schritt)'));
   const qtyMarginRow = el('div', { class: 'row' }, el('label', { style: 'min-width:96px' }, 'Stückzahl'), qtyI, el('label', { style: 'min-width:96px' }, 'Margen-Stufe'), tierSel);
-  const priceRow = el('div', { class: 'row' }, el('label', { style: 'min-width:96px' }, 'Preis (€)'), priceI, priceHint,
-    el('label', { style: 'margin-left:12px;display:flex;align-items:center;gap:6px' }, paidCb, 'bezahlt'));
+  const paidWrap = el('label', { style: 'margin-left:12px;display:flex;align-items:center;gap:6px' }, paidCb, 'bezahlt');
+  const priceRow = el('div', { class: 'row' }, el('label', { style: 'min-width:96px' }, 'Preis (€)'), priceI, priceHint, paidWrap);
   body.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Kalkulation'),
     el('div', { class: 'bd' }, artRow, modelRow, mwRow, gInput, phInput, lhInput, qtyMarginRow, priceRow, exclRow, fileRow)));
 
@@ -1610,7 +1685,7 @@ async function openProject(id) {
         wi, el('span', { class: 'muted', style: 'font-size:11px' }, 'g'),
         ti, el('span', { class: 'muted', style: 'font-size:11px' }, 'min'),
         el('span', { class: 'num muted', style: 'font-size:11px' }, '= ' + fmt((+it.qty || 0) * (+it.weight_g || 0)) + ' g · ' + fmt1(((+it.qty || 0) * (+it.print_min || 0)) / 60) + ' h'),
-        el('button', { class: 'btn sm ghost', onclick: async () => { const r = await api('/project-items/' + it.id, { method: 'DELETE' }); items = r.items || []; drawItems(); drawRes(); loadOverview(); } }, '✕')));
+        el('button', { class: 'btn sm ghost', onclick: async () => { const r = await api('/project-items/' + it.id, { method: 'DELETE' }); items = r.items || []; drawItems(); drawRes(); loadOverview(); if (r.trash_id) toastUndo('Position gelöscht', r.trash_id, async () => { const nd = await api('/project/' + id); items = nd.items || []; drawItems(); drawRes(); loadOverview(); }); } }, '✕')));
     });
   };
   const posModel = modelSelect();
@@ -1646,6 +1721,9 @@ async function openProject(id) {
     artRow.style.display = self ? 'none' : '';
     qtyMarginRow.style.display = self ? 'none' : '';
     priceRow.style.display = self ? 'none' : '';
+    // Kostenlos: es gibt nichts zu bezahlen -> „bezahlt"-Häkchen ausblenden.
+    const free = p.margin_tier === 'kostenlos' || (p.price != null && p.price !== '' && +p.price <= 0);
+    paidWrap.style.display = free ? 'none' : '';
     exclRow.style.display = (!self && modelOnly) ? '' : 'none';
     fileRow.style.display = (!self && modelOnly) ? '' : 'none';
     const exclusive = !!p.no_upload;
@@ -1665,9 +1743,9 @@ async function openProject(id) {
       q.onchange = async () => { const r = await jpost('/project-parts/' + pp.id, { qty: +q.value }, 'PUT'); parts = r.parts || parts; drawParts(); drawRes(); loadOverview(); };
       plist.append(el('div', { class: 'checkline' }, q, el('span', { style: 'flex:1' }, pp.name, el('span', { class: 'muted' }, ' · ' + eur(pp.unit_price) + '/' + (pp.unit || 'Stk'))),
         el('span', { class: 'num' }, eur((pp.qty || 0) * (pp.unit_price || 0))),
-        el('button', { class: 'btn sm ghost', onclick: async () => { const r = await api('/project-parts/' + pp.id, { method: 'DELETE' }).then(x => x); parts = r.parts || []; drawParts(); drawRes(); loadOverview(); } }, '✕'))); }); };
+        el('button', { class: 'btn sm ghost', onclick: async () => { const r = await api('/project-parts/' + pp.id, { method: 'DELETE' }); parts = r.parts || []; drawParts(); drawRes(); loadOverview(); if (r.trash_id) toastUndo('Teil entfernt', r.trash_id, async () => { const nd = await api('/project/' + id); parts = nd.parts || []; drawParts(); drawRes(); loadOverview(); }); } }, '✕'))); }); };
   drawParts();
-  const partSel = el('select', {}, el('option', { value: '' }, catalog.length ? '— Teil wählen —' : 'Katalog leer → unter „Teile" anlegen'), catalog.map(c => el('option', { value: c.id }, `${c.name} · ${eur(c.unit_price)}`)));
+  const partSel = el('select', {}, el('option', { value: '' }, catalog.length ? '— Teil wählen —' : 'Katalog leer → unter „Bauteile" anlegen'), catalog.map(c => el('option', { value: c.id }, `${c.name} · ${eur(c.unit_price)}`)));
   const partQty = el('input', { type: 'number', step: '0.5', value: 1, style: 'width:60px' });
   const addPart = async () => { if (!partSel.value) return; const r = await jpost('/projects/' + id + '/parts', { part_id: +partSel.value, qty: +partQty.value || 1 }); parts = r.parts || parts; drawParts(); drawRes(); loadOverview(); };
   body.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Einzelteile', el('a', { onclick: () => { closeDrawer(); go('teile'); }, style: 'font-weight:400;text-transform:none;font-size:11px' }, 'Katalog verwalten →')),
@@ -1694,13 +1772,13 @@ async function openProject(id) {
         const base = cfg.public_base_url || location.origin;
         const url = base + '/p/' + r.token;
         if (!cfg.public_base_url) toast('Tipp: öffentliche Adresse unter „Daten & Pull" setzen — sonst nur lokal erreichbar.');
-        try { await navigator.clipboard.writeText(url); toast('Statuslink kopiert'); } catch { prompt('Statuslink (kopieren & verschicken):', url); }
+        try { await navigator.clipboard.writeText(url); toast('Statuslink kopiert'); } catch { await askText({ title: 'Statuslink', text: 'Zum Kopieren und Verschicken:', value: url, readonly: true, okText: 'Schließen' }); }
         window.open(url, '_blank');
       } }, 'Statuslink'));
   }
-  actionBtns.push(el('button', { class: 'btn sm ghost', onclick: async () => { if (!confirm('Projekt löschen?')) return; const cid = p.contact_id; const self = p.self; await api('/projects/' + id, { method: 'DELETE' }); if (self) { closeDrawer(); go('selbst'); } else if (cid) openContact(cid); else closeDrawer(); } }, 'Projekt löschen'));
+  actionBtns.push(el('button', { class: 'btn sm ghost', onclick: async () => { const cid = p.contact_id; const self = p.self; await delWithUndo('/projects/' + id, 'Projekt', () => openProject(id)); if (self) { closeDrawer(); go('selbst'); } else if (cid) openContact(cid); else closeDrawer(); } }, 'Projekt löschen'));
   body.append(el('div', { class: 'card' }, el('div', { class: 'bd row' }, ...actionBtns)));
-  drawRes();
+  renderRes(calc);   // erster Stand direkt aus der Server-Antwort; Aenderungen laufen ueber drawRes()
 }
 
 // ---- Projekt-Pipeline (Kanban) ----
@@ -1709,21 +1787,37 @@ async function renderProjekte() {
   const w = pagehead('Projekte', 'Von der Anfrage bis Fertig. Die Phase „Modellieren" lässt sich überspringen (direkt auf Drucken).');
   const list = await api('/crm/projects');
   const board = el('div', { class: 'board' });
+  // Ziel-Stufe setzen (Drag & Drop / Dropdown); Server lehnt "ausgeliefert" ohne Zahlung ab.
+  const moveTo = async (id, stage) => { const r = await jpost('/projects/' + id, { stage }, 'PUT'); if (r && r.error) toast(r.error); renderProjekte(); };
+  const mkCard = p => { const c = p.calc || {};
+    const sel = mkSelect(PROJECT_STAGES, p.stage || 'anfrage', 'sm'); sel.onclick = e => e.stopPropagation();
+    sel.onchange = async e => { e.stopPropagation(); await moveTo(p.id, sel.value); };
+    const card = el('div', { class: 'kcard', onclick: () => openProject(p.id) },
+      el('div', { class: 'kt' }, p.title),
+      el('div', { class: 'krow' }, prioBadge(p.priority), deadlineBadge(p.due_date)),
+      el('div', { class: 'muted', style: 'font-size:11px' }, p.contact_name + (p.model_title ? ' · ' + p.model_title : '')),
+      el('div', { class: 'muted num', style: 'font-size:11px' }, c.free ? 'gratis · Verlust ' + eur(c.loss) : `${eur(c.price)} · Kosten ${eur(c.cost)}`), sel);
+    dndCard(card, p.id);
+    return card;
+  };
+  let archOpen = localStorage.getItem('proj_arch_open') === '1';   // Archiv-Spalte per Default eingeklappt
   PROJECT_STAGES.forEach(([sv, sl]) => {
     const members = list.filter(p => (p.stage || 'anfrage') === sv).sort((a, b) => (b.priority ?? 1) - (a.priority ?? 1));
+    if (sv === 'ausgeliefert') {   // schlanke, standardmäßig eingeklappte Archiv-Spalte ganz rechts
+      const col = el('div', { class: 'col arch' + (archOpen ? '' : ' collapsed') });
+      const toggle = () => { archOpen = !archOpen; localStorage.setItem('proj_arch_open', archOpen ? '1' : '0'); renderProjekte(); };
+      col.append(el('div', { class: 'colhd arch-hd', style: `border-top:3px solid ${PSTAGE_COLOR[sv]}`, title: archOpen ? 'Einklappen' : 'Ausklappen', onclick: toggle },
+        el('span', { class: 'arch-caret' }, archOpen ? '▾' : '▸'), el('span', { class: 'arch-lbl' }, sl), el('span', { class: 'cnt' }, members.length)));
+      dndColumn(col, sv, moveTo);
+      if (archOpen) {
+        members.forEach(p => col.append(mkCard(p)));
+        if (!members.length) col.append(el('div', { class: 'muted', style: 'padding:8px' }, '—'));
+      }
+      board.append(col); return;
+    }
     const col = el('div', { class: 'col' }, el('div', { class: 'colhd', style: `border-top:3px solid ${PSTAGE_COLOR[sv]}` }, sl, el('span', { class: 'cnt' }, members.length)));
-    dndColumn(col, sv, async (id, stage) => { await jpost('/projects/' + id, { stage }, 'PUT'); renderProjekte(); });
-    members.forEach(p => { const c = p.calc || {};
-      const sel = mkSelect(PROJECT_STAGES, sv, 'sm'); sel.onclick = e => e.stopPropagation();
-      sel.onchange = async e => { e.stopPropagation(); await jpost('/projects/' + p.id, { stage: sel.value }, 'PUT'); renderProjekte(); };
-      const card = el('div', { class: 'kcard', onclick: () => openProject(p.id) },
-        el('div', { class: 'kt' }, p.title),
-        el('div', { class: 'krow' }, prioBadge(p.priority), deadlineBadge(p.due_date)),
-        el('div', { class: 'muted', style: 'font-size:11px' }, p.contact_name + (p.model_title ? ' · ' + p.model_title : '')),
-        el('div', { class: 'muted num', style: 'font-size:11px' }, c.free ? 'gratis · Verlust ' + eur(c.loss) : `${eur(c.price)} · Kosten ${eur(c.cost)}`), sel);
-      dndCard(card, p.id);
-      col.append(card);
-    });
+    dndColumn(col, sv, moveTo);
+    members.forEach(p => col.append(mkCard(p)));
     if (!members.length) col.append(el('div', { class: 'muted', style: 'padding:8px' }, '—'));
     board.append(col);
   });
@@ -1733,7 +1827,7 @@ async function renderProjekte() {
 // ---- Eigenprojekte (kein Kunde): Modellieren → Drucken → Fotos → MW-Eintrag → Veröffentlicht ----
 async function renderSelfProjects() {
   if (!STATE.overview) await loadOverview();
-  const w = pagehead('Eigenprojekte', 'Eigene Produkte planen: modellieren, drucken, fotografieren, MakerWorld-Eintrag erstellen und veröffentlichen. Ohne Kunde.');
+  const w = pagehead('Eigenprojekte', 'Eigene Modelle planen: modellieren, drucken, fotografieren, MakerWorld-Eintrag erstellen und veröffentlichen. Ohne Kunde.');
   const nameI = el('input', { placeholder: 'Neues Eigenprojekt …', style: 'flex:1;min-width:160px' });
   const prioI = mkSelect(PRIORITIES, '1', 'sm'); const dueI = el('input', { type: 'date' });
   const add = async () => { if (!nameI.value.trim()) return; const np = await jpost('/projects', { self: 1, title: nameI.value.trim(), priority: +prioI.value, due_date: dueI.value || null }); nameI.value = ''; dueI.value = ''; openProject(np.id); };
@@ -1764,7 +1858,7 @@ async function renderSelfProjects() {
 
 // ---- Teile-Katalog + Kalkulations-Einstellungen ----
 async function renderParts() {
-  const w = pagehead('Teile & Kalkulation', 'Bauteil-Katalog und globale Kalkulationsparameter für die Preisbildung.');
+  const w = pagehead('Bauteile & Kalkulation', 'Bauteil-Katalog und globale Kalkulationsparameter für die Preisbildung.');
   const s = await api('/crm/settings');
   // Kalkulations-Einstellungen
   const fI = el('input', { type: 'number', step: '0.5', value: s.filament_price_kg, style: 'width:80px' });
@@ -1777,7 +1871,10 @@ async function renderParts() {
     tiers.forEach((t, i) => { const nm = el('input', { value: t.name, placeholder: 'Name', style: 'width:140px' });
       const mg = el('input', { type: 'number', step: '5', value: Math.round(t.margin * 100), style: 'width:70px' });
       nm.oninput = () => t.name = nm.value; mg.oninput = () => t.margin = (+mg.value || 0) / 100;
+      const df = el('input', { type: 'radio', name: 'deftier' }); df.checked = !!t.default;
+      df.onchange = () => { tiers.forEach(x => { delete x.default; }); t.default = true; };
       tierWrap.append(el('div', { class: 'row', style: 'margin:2px 0' }, nm, mg, el('span', { class: 'muted' }, '% Marge'),
+        el('label', { class: 'muted', style: 'display:flex;align-items:center;gap:4px', title: 'Wird für neue Projekte und Projekte ohne Stufe verwendet' }, df, 'Standard'),
         el('button', { class: 'btn sm ghost', onclick: () => { tiers.splice(i, 1); drawTiers(); } }, '✕'))); });
     tierWrap.append(el('button', { class: 'btn sm', onclick: () => { tiers.push({ name: 'Neu', margin: 0.5 }); drawTiers(); } }, '+ Stufe')); };
   drawTiers();
@@ -1788,16 +1885,16 @@ async function renderParts() {
         el('label', { style: 'min-width:130px;margin-left:16px' }, 'Strom/Verschleiß (€/h)'), eI),
       el('div', { class: 'row' }, el('label', { style: 'min-width:150px' }, 'Arbeitslohn (€/h)'), lI,
         el('label', { style: 'min-width:130px;margin-left:16px' }, 'Preis runden'), rI),
-      el('div', { style: 'margin-top:10px' }, el('label', { class: 'muted' }, 'Margen-Stufen (eine für Freunde niedriger):'), tierWrap),
+      el('div', { style: 'margin-top:10px' }, el('label', { class: 'muted' }, 'Margen-Stufen (eine für Freunde niedriger). „Standard" gilt für neue Projekte und Projekte ohne Stufe:'), tierWrap),
       el('div', { class: 'row', style: 'margin-top:8px' }, el('button', { class: 'btn primary sm', onclick: saveSettings }, 'Speichern')))));
 
-  // Teile-Katalog
+  // Bauteil-Katalog
   const parts = await api('/parts');
   const nName = el('input', { placeholder: 'Teil (z.B. Neodym-Magnet 8×3)', style: 'flex:1;min-width:180px' });
   const nCat = mkSelect(PART_CATEGORIES, 'magnet'); const nUnit = el('input', { value: 'Stk', style: 'width:60px' });
   const nPrice = el('input', { type: 'number', step: '0.01', placeholder: '€/Einheit', style: 'width:90px' });
   const addPart = async () => { if (!nName.value.trim()) return; await jpost('/parts', { name: nName.value.trim(), category: nCat.value, unit: nUnit.value, unit_price: +nPrice.value || 0 }); nName.value = ''; nPrice.value = ''; renderParts(); };
-  w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, `Teile-Katalog (${parts.length})`),
+  w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, `Bauteil-Katalog (${parts.length})`),
     el('div', { class: 'bd' }, el('div', { class: 'row' }, nName, nCat, nUnit, nPrice, el('button', { class: 'btn primary sm', onclick: addPart }, '+ Teil')))));
   if (parts.length) {
     const wrap = el('div', { class: 'tablewrap' }); w.append(wrap);
@@ -1805,7 +1902,7 @@ async function renderParts() {
       el('tbody', {}, parts.map(pt => { const pr = el('input', { type: 'number', step: '0.01', value: pt.unit_price, style: 'width:80px' });
         pr.onchange = () => jpost('/parts/' + pt.id, { unit_price: +pr.value }, 'PUT').then(() => toast('Preis aktualisiert.'));
         return el('tr', {}, el('td', { class: 'title' }, pt.name), el('td', {}, labelOf(PART_CATEGORIES, pt.category)), el('td', {}, pt.unit),
-          el('td', { class: 'n' }, pr), el('td', {}, el('button', { class: 'btn sm ghost', onclick: async () => { await api('/parts/' + pt.id, { method: 'DELETE' }); renderParts(); } }, '✕'))); }))));
+          el('td', { class: 'n' }, pr), el('td', {}, el('button', { class: 'btn sm ghost', onclick: async () => { await delWithUndo('/parts/' + pt.id, 'Bauteil', () => renderParts()); renderParts(); } }, '✕'))); }))));
   }
 }
 
@@ -1841,7 +1938,7 @@ async function renderDruckplan() {
         const r = await jpost('/crm/production/print', { item_id: j.id, spool_id: spoolSel.value || null });
         toast('Druck verbucht' + (r.spool ? ` · ${Math.round(r.spool.remaining_g)} g Rest auf Spule` : '')); renderDruckplan();
       } }, '✓ gedruckt')),
-      el('td', {}, el('button', { class: 'btn sm ghost', title: 'Zurücknehmen', onclick: async () => { await jpost('/crm/production/unprint', { item_id: j.id }); renderDruckplan(); } }, '−'))));
+      el('td', {}, el('button', { class: 'btn sm ghost', title: 'Zurücknehmen', onclick: async () => { const r = await jpost('/crm/production/unprint', { item_id: j.id }); if (r.spool) toast(`Zurückgenommen · ${Math.round(r.spool.remaining_g)} g Rest auf Spule`); renderDruckplan(); } }, '−'))));
   });
   wrap.append(tb);
   w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Offene Drucke', el('a', { onclick: () => go('material'), style: 'font-weight:400;text-transform:none;font-size:11px' }, 'Filament-Lager →')), wrap));
@@ -1870,7 +1967,7 @@ async function renderMaterial() {
           isLow ? el('span', { class: 'tag', style: 'background:var(--neg);margin-left:6px' }, 'niedrig') : null),
         el('div', { class: 'goalbar', style: 'width:120px' }, el('i', { style: `width:${pctv}%;background:${isLow ? 'var(--neg)' : 'var(--pos)'}` }), el('span', {}, pctv + '%')),
         remI, el('span', { class: 'muted', style: 'font-size:11px' }, '/ ' + Math.round(s.total_g || 0) + ' g'),
-        el('button', { class: 'btn sm ghost', onclick: async () => { if (!confirm('Spule „' + s.material + ' ' + s.color + '" löschen?')) return; await api('/spools/' + s.id, { method: 'DELETE' }); renderMaterial(); } }, '✕')));
+        el('button', { class: 'btn sm ghost', onclick: async () => { await delWithUndo('/spools/' + s.id, 'Spule', () => renderMaterial()); renderMaterial(); } }, '✕')));
     }); };
   draw();
   w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Bestand', el('a', { onclick: () => go('druckplan'), style: 'font-weight:400;text-transform:none;font-size:11px' }, '← Druckplan')), el('div', { class: 'bd' }, list)));
@@ -1898,6 +1995,35 @@ async function renderData() {
   w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Sprache / Language'),
     el('div', { class: 'bd' }, el('div', { class: 'row' }, el('label', { style: 'min-width:150px' }, 'Sprache'), langSel,
       el('span', { class: 'muted', style: 'font-size:11px' }, 'Umschalten zwischen Deutsch (Fachbegriffe) und Englisch.')))));
+  // Systemstatus (Pull, Backup, Speicher) — damit Probleme auffallen, bevor Zahlen veralten.
+  const hl = await api('/health').catch(() => null);
+  if (hl) {
+    const row = (k, v, cls) => el('div', { class: 'checkline' }, el('span', { style: 'flex:1' }, k), el('span', { class: 'num ' + (cls || '') }, v));
+    const ageTxt = h => h == null ? '–' : h < 1 ? Math.max(1, Math.round(h * 60)) + ' Min' : h < 48 ? (Math.round(h * 10) / 10) + ' h' : Math.round(h / 24) + ' Tage';
+    const mb = b => b >= 1e9 ? (b / 1e9).toFixed(2) + ' GB' : (b / 1e6).toFixed(1) + ' MB';
+    const lr = hl.lastRun;
+    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Systemstatus', hl.issues.length ? el('span', { class: 'tag err' }, hl.issues.length + ' Hinweis(e)') : el('span', { class: 'tag ok' }, 'alles in Ordnung')),
+      el('div', { class: 'bd' },
+        ...hl.issues.map(i => el('div', { class: 'issue ' + i.level }, i.text)),
+        row('Letzter Pull', lr ? `${nice(lr.finished_at || lr.started_at)} · ${lr.status} · ${lr.models_ok ?? 0} ok / ${lr.models_failed ?? 0} Fehler` : '–', lr && lr.status === 'error' ? 'neg' : ''),
+        row('Letzter erfolgreicher Pull', hl.pullAgeH != null ? `vor ${ageTxt(hl.pullAgeH)}` : '–', hl.pullAgeH > 36 ? 'neg' : ''),
+        row('Letztes Backup', hl.backup ? `${nice(hl.backup.at)} · ${hl.backup.count} Dateien (${mb(hl.backup.bytes)})` : 'keins gefunden', hl.backup && hl.backup.ageH <= 36 ? '' : 'neg'),
+        row('Datenbank', mb(hl.dbBytes), hl.dbBytes > 1e9 ? 'neg' : ''),
+        row('Freier Speicherplatz', hl.diskFreeGb != null ? hl.diskFreeGb + ' GB' : '–', hl.diskFreeGb != null && hl.diskFreeGb < 5 ? 'neg' : ''),
+        row('Freier Arbeitsspeicher', hl.memAvailableMb != null ? hl.memAvailableMb + ' MB' : '–', hl.memAvailableMb != null && hl.memAvailableMb < 300 ? 'neg' : ''),
+        row('Dienst läuft seit', ageTxt(hl.uptimeH)))));
+  }
+  // Papierkorb: Geloeschtes ist 30 Tage wiederherstellbar.
+  const trash = await api('/trash').catch(() => []);
+  const KIND = { todo: 'Aufgabe', event: 'Änderungseintrag', view: 'Segment', expense: 'Ausgabe', payout: 'Auszahlung', part: 'Bauteil', spool: 'Spule', item: 'Druckposition', partlink: 'Teil im Projekt', model: 'Geplantes Modell', project: 'Projekt', contact: 'Kunde inkl. Projekten' };
+  const trashBody = el('div', { class: 'bd' });
+  if (!trash.length) trashBody.append(el('span', { class: 'muted' }, 'Leer. Gelöschte Kunden, Projekte, Aufgaben usw. liegen hier 30 Tage und lassen sich wiederherstellen.'));
+  trash.forEach(tr => trashBody.append(el('div', { class: 'checkline' },
+    el('span', { class: 'tag', style: 'background:#6b7280' }, KIND[tr.kind] || tr.kind), el('span', { style: 'flex:1' }, tr.label || '—'),
+    el('span', { class: 'muted', style: 'font-size:11px' }, 'noch ' + tr.days_left + ' Tage'),
+    el('button', { class: 'btn sm', onclick: async () => { const r = await api('/trash/' + tr.id + '/restore', { method: 'POST' }); toast(r.ok ? 'Wiederhergestellt: ' + (r.label || '') : (r.error || 'Nicht möglich.')); renderData(); } }, 'Wiederherstellen'),
+    el('button', { class: 'btn sm ghost', title: 'Endgültig löschen', onclick: async () => { await api('/trash/' + tr.id, { method: 'DELETE' }); renderData(); } }, '✕'))));
+  w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, `Papierkorb (${trash.length})`), trashBody));
   const loginBadge = login.loggedIn ? el('span', { class: 'tag ok' }, 'eingeloggt' + (login.handle ? ' @' + login.handle : '')) : el('span', { class: 'tag err' }, 'nicht eingeloggt');
   const loginLog = el('div', { class: 'log', style: 'display:none' });
   w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, '1) MakerWorld-Login', loginBadge),
@@ -1908,7 +2034,8 @@ async function renderData() {
 
   w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, '2) Live-Pull'),
     el('div', { class: 'bd' }, el('p', { class: 'muted' }, 'Zieht Analytics + Beschreibung, Tags, Kommentare, Sammlungen und Bilder. Läuft in sichtbarem Chrome (off-screen).'),
-      el('div', { class: 'row' }, el('button', { class: 'btn primary', onclick: triggerPull }, 'Jetzt ziehen')), el('div', { id: 'pullLog', class: 'log', style: 'display:none' }))));
+      el('div', { class: 'row' }, el('button', { class: 'btn primary', onclick: triggerPull }, 'Jetzt ziehen'),
+        el('button', { class: 'btn ghost', title: 'Laufenden Pull abbrechen', onclick: async () => { const r = await api('/pull/cancel', { method: 'POST' }); toast(r.ok ? 'Abbruch angefordert.' : (r.reason || 'Kein Pull aktiv.')); pollPull(); } }, 'Abbrechen')), el('div', { id: 'pullLog', class: 'log', style: 'display:none' }))));
 
   const timeI = el('input', { type: 'time', value: s.schedule_time });
   const enI = el('input', { type: 'checkbox' }); enI.checked = s.schedule_enabled;
@@ -1945,7 +2072,7 @@ async function renderData() {
         el('button', { class: 'btn', onclick: async () => { await jpost('/settings', { spool_low_g: +lowI.value }); toast('Gespeichert.'); } }, 'Speichern')))));
 
   // Öffentlicher Statuslink (Basis-Adresse für verschickte Links)
-  const pubI = el('input', { value: s.public_base_url || '', placeholder: 'z.B. https://dein-host.dein-tailnet.ts.net:8443', style: 'flex:1;min-width:260px' });
+  const pubI = el('input', { value: s.public_base_url || '', placeholder: 'z.B. https://raspberrypi.dein-tailnet.ts.net:8443', style: 'flex:1;min-width:260px' });
   w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, '6) Öffentlicher Statuslink'),
     el('div', { class: 'bd' },
       el('p', { class: 'muted' }, 'Adresse, unter der die Auftrags-Statusseite von außen erreichbar ist (nur die Statusseite, nicht das Dashboard). Wird für die „Statuslink"-Buttons verwendet. Leer = nur lokal.'),
@@ -1965,15 +2092,24 @@ async function renderData() {
           await jpost('/settings', { eur_per_point: e / p }); STATE.overview = null; await loadOverview();
           toast(`Gespeichert: ${eur(e / p)} pro Punkt`); renderData();
         } }, 'Speichern')))));
-
-  w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Alt-Export importieren'),
-    el('div', { class: 'bd' }, el('div', { class: 'row' }, el('button', { class: 'btn', onclick: async e => { e.target.disabled = true; const r = await jpost('/import', {}); e.target.disabled = false; toast(r.ok ? `Import: ${r.models} Modelle, ${r.daily} Tageszeilen` : 'Fehler: ' + r.error); STATE.overview = null; } }, 'Standard-Export importieren')))));
 }
 
 async function triggerPull() { const box = $('#pullLog'); if (box) { box.style.display = 'block'; box.textContent = 'starte …'; } const r = await api('/pull/start', { method: 'POST' }); if (!r.started) toast(r.reason || 'läuft schon'); pollPull(); }
 
 // ---- Pull-Status ----
 let pollTimer = null, wasRunning = false;
+// Nach einem Pull die aktuelle Seite mit frischen Daten neu zeichnen - aber nichts zerstoeren:
+//  - offener Detail-Drawer oder Eingabe in Arbeit (Feld hat Fokus): NICHT neu rendern, nur Hinweis
+//    (beim naechsten Seitenwechsel sind die Daten ohnehin neu);
+//  - sonst neu rendern und die Scroll-Position wiederherstellen.
+async function softRefresh() {
+  const drawerOpen = !$('#drawer').classList.contains('hidden');
+  const ae = document.activeElement, typing = ae && ae.closest && ae.closest('#view') && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName);
+  if (drawerOpen || typing) { toast('Pull abgeschlossen — neue Daten sind geladen (Anzeige aktualisiert sich beim nächsten Seitenwechsel).'); return; }
+  const main = $('main'), y = Math.max(window.scrollY, main ? main.scrollTop : 0);
+  try { await routes[CUR_ROUTE](); } catch { return; }
+  requestAnimationFrame(() => { window.scrollTo(0, y); if (main) main.scrollTop = y; });
+}
 async function pollPull() {
   const st = await api('/pull/status');
   const side = $('#pullStatus'), btn = $('#pullBtn'), box = $('#pullLog');
@@ -1981,7 +2117,7 @@ async function pollPull() {
   else { btn.disabled = false; btn.textContent = t('Live-Pull starten'); if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     if (st.lastResult) side.textContent = st.lastResult.ok ? `✓ ${st.lastResult.ok} ${t('Modelle aktualisiert')}` : ('✗ ' + st.lastResult.error);
     if (box && st.log.length) box.textContent = st.log.join('\n');
-    if (wasRunning) { wasRunning = false; await loadOverview(); const cur = location.hash.slice(1) || 'overview'; if (routes[cur]) go(cur); } else renderLastPull();
+    if (wasRunning) { wasRunning = false; await loadOverview(); softRefresh(); } else renderLastPull();
   }
 }
 $('#pullBtn').addEventListener('click', triggerPull);
@@ -1995,13 +2131,78 @@ function chartOpts() {
 }
 function toast(msg) { const t = el('div', { style: 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#1a1c1f;color:#fff;border:1px solid #000;padding:8px 16px;z-index:99;font-size:12px' }, msg); document.body.append(t); setTimeout(() => t.remove(), 2600); }
 
+// ---- Papierkorb / Rueckgaengig -------------------------------------------------------------------------
+// Geloeschtes landet 30 Tage im Papierkorb (Server). Der Hinweis bietet "Rückgängig"; danach laeuft `after` (Ansicht neu laden).
+function toastUndo(msg, trashId, after) {
+  const bar = el('div', { class: 'toast undo', role: 'status' }, el('span', {}, msg),
+    el('button', { class: 'btn sm', onclick: async () => {
+      bar.remove(); const r = await api('/trash/' + trashId + '/restore', { method: 'POST' });
+      if (r && r.ok) { toast('Wiederhergestellt: ' + (r.label || '')); if (after) await after(); } else toast((r && r.error) || 'Wiederherstellen nicht möglich.');
+    } }, 'Rückgängig'));
+  // Mehrere Hinweise stapeln sich nach oben statt sich zu verdecken.
+  bar.style.bottom = (16 + document.querySelectorAll('.toast.undo').length * 46) + 'px';
+  document.body.append(bar); setTimeout(() => bar.remove(), 9000);
+}
+// DELETE ausfuehren und Rueckgaengig anbieten; liefert die Server-Antwort.
+async function delWithUndo(path, label, after) {
+  const r = await api(path, { method: 'DELETE' });
+  if (r && r.trash_id) toastUndo(label + ' gelöscht', r.trash_id, after); else if (r && r.error) toast(r.error);
+  return r;
+}
+// ---- Eingabedialoge (statt prompt/confirm des Browsers; mit Fokus, Enter/Esc, Tastatur) ------------------
+function modalDialog({ title, text, value, placeholder, okText = 'OK', cancelText = 'Abbrechen', input = true, readonly = false }) {
+  return new Promise(resolve => {
+    const prev = document.activeElement;
+    const inp = input ? el('input', { type: 'text', value: value || '', placeholder: placeholder || '', 'aria-label': title, readonly: readonly || null, style: 'width:100%' }) : null;
+    const done = v => { scrim.remove(); if (prev && document.contains(prev)) prev.focus({ preventScroll: true }); resolve(v); };
+    const ok = el('button', { class: 'btn primary', onclick: () => done(input ? inp.value : true) }, okText);
+    const cancel = readonly ? null : el('button', { class: 'btn', onclick: () => done(input ? null : false) }, cancelText);
+    const box = el('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+      el('h2', {}, title), text ? el('p', { class: 'muted' }, text) : null, inp, el('div', { class: 'row modal-btns' }, cancel, ok));
+    const scrim = el('div', { class: 'modal-scrim' }, box);
+    box.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { e.stopPropagation(); done(input ? null : false); }
+      else if (e.key === 'Enter' && e.target !== cancel) { e.preventDefault(); ok.click(); }
+      else if (e.key === 'Tab') { const f = [...box.querySelectorAll('input,button')]; const i = f.indexOf(document.activeElement);
+        if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); } else if (!e.shiftKey && i === f.length - 1) { e.preventDefault(); f[0].focus(); } }
+    });
+    scrim.addEventListener('mousedown', e => { if (e.target === scrim && !readonly) done(input ? null : false); });
+    document.body.append(scrim); (inp || ok).focus(); if (inp) inp.select();
+  });
+}
+const askText = o => modalDialog({ ...o, input: true });
+const askConfirm = (title, text, okText) => modalDialog({ title, text, okText: okText || 'OK', input: false });
+
 // ---- Wörterbuch Deutsch -> Englisch (Quelle im Code ist Deutsch) ----------
 const TR = {
+  'Rückgängig': 'Undo', 'Wiederhergestellt: ': 'Restored: ', 'Wiederherstellen': 'Restore', 'Papierkorb': 'Trash', 'Abbrechen': 'Cancel', 'Segment speichern': 'Save segment', 'Modell planen': 'Plan model', 'Neuer Kunde / Lead': 'New customer / lead',
+  'Leer. Gelöschte Kunden, Projekte, Aufgaben usw. liegen hier 30 Tage und lassen sich wiederherstellen.': 'Empty. Deleted customers, projects, tasks etc. stay here for 30 days and can be restored.',
+  'Läuft heiß': 'Heating up', 'Kühlt ab': 'Cooling down', 'Stillstand': 'Stalled', 'Ziel erreicht': 'Goal reached', 'Ziel nah': 'Goal close',
+  'Modell-Pipeline': 'Model pipeline', 'Modell planen': 'Plan model', 'Geplantes Modell löschen': 'Delete planned model', 'Verdient gesamt': 'Earned (total)', 'Punkte gesamt': 'Points (total)',
+  'Impressionen': 'Impressions', 'Eigene Kategorie je Modell zuordnen': 'Assign own category per model', 'Downloads kumuliert je Modell': 'Downloads cumulative per model',
+  'Pull abgeschlossen — neue Daten sind geladen (Anzeige aktualisiert sich beim nächsten Seitenwechsel).': 'Pull finished — new data loaded (the view refreshes on the next page change).',
+  'Impressionen: wie oft das Modell in Listen und Suchergebnissen angezeigt wurde': 'Impressions: how often the model was shown in lists and search results', 'Aufrufe der Modellseite': 'Views of the model page',
+  'Klickrate: Views ÷ Impressionen': 'Click-through rate: views ÷ impressions', 'Downloads gesamt': 'Total downloads', 'Downloads in den letzten 30 Tagen': 'Downloads in the last 30 days',
+  'Veränderung der Views gegenüber der Vorwoche': 'Change in views versus the previous week', 'Anzahl Likes': 'Number of likes', 'Erhaltene Boosts': 'Boosts received',
+  'Aktueller Punktestand Ihres MakerWorld-Kontos (Wallet) laut letztem Pull — noch nicht eingelöst.': 'Current point balance of your MakerWorld account (wallet) as of the last pull — not yet redeemed.',
+  'Summe der Punkte, die alle Ihre Modelle seit Beginn der Aufzeichnung eingebracht haben.': 'Sum of the points all your models have earned since tracking began.',
+  'Punkte gesamt × Punktwert (aktuell 524 Punkte = 40 €). Rechnerischer Wert, keine Auszahlung.': 'Total points × point value (currently 524 points = 40 €). Calculated value, not a payout.',
+  'Wochenbericht': 'Weekly report', 'Punkte & Gutschein': 'Points & voucher', 'Liste': 'List', 'Board': 'Board', 'Produkt-Pipeline': 'Product pipeline',
+  'Kalkulation & Bauteile': 'Costing & parts', 'Ideen & Entwürfe': 'Ideas & Drafts', 'Material & Kalkulation': 'Material & Costing', 'Modelle': 'Models', 'Auswertung': 'Analysis',
+  'Geschäft': 'Business',
+  'Menü öffnen': 'Open menu', 'Menü schließen': 'Close menu', 'Schließen': 'Close',
+  'Standard': 'Default', 'Zurückgenommen': 'Undone',
+  'Systemhinweise': 'System notices', 'Systemstatus': 'System status', 'Details →': 'Details →', 'alles in Ordnung': 'all good',
+  'Letzter Pull': 'Last pull', 'Letzter erfolgreicher Pull': 'Last successful pull', 'Letztes Backup': 'Last backup', 'Datenbank': 'Database',
+  'Freier Speicherplatz': 'Free disk space', 'Freier Arbeitsspeicher': 'Free memory', 'Dienst läuft seit': 'Service running for', 'Abbrechen': 'Cancel',
+  'Server nicht erreichbar — Verbindung zur Pi prüfen.': 'Server unreachable — check the connection to the Pi.',
+  'letztes Projekt': 'last project', 'Proj.': 'proj.', 'Bester Hashtag': 'Best hashtag',
+  'Dieses Modell ist oben bereits gezählt (mehrere Projekte nutzen dasselbe Modell) und geht nicht in die Summe ein.': 'This model is already counted above (several projects use the same model) and is not part of the total.',
   // Seitentitel
   'Übersicht': 'Overview', 'Momentum': 'Momentum', 'Vergleich': 'Comparison', 'Kategorien & Gruppen': 'Categories & Groups',
   'Punkte-Ökonomie': 'Points Economy', 'Bericht': 'Report', 'Aufgaben': 'Tasks', 'Pipeline': 'Pipeline',
-  'Änderungs-Historie': 'Change History', 'Heute': 'Today', 'Kunden': 'Customers', 'Leads': 'Leads',
-  'Finanzen': 'Finance', 'Projekte': 'Projects', 'Teile & Kalkulation': 'Parts & Costing', 'Druckplan': 'Print Queue',
+  'Heute': 'Today', 'Kunden': 'Customers', 'Leads': 'Leads',
+  'Finanzen': 'Finance', 'Projekte': 'Projects', 'Bauteile & Kalkulation': 'Parts & Costing', 'Bauteil-Katalog': 'Parts catalog', 'Druckplan': 'Print Queue',
   'Filament-Lager': 'Filament Stock', 'Daten & Pull': 'Data & Sync', 'Produkte': 'Products', 'Kategorien': 'Categories', 'Punkte': 'Points',
   // Untertitel
   'Was gerade läuft — 7/30-Tage-Aktivität, Trend gegenüber Vorwoche.': 'Current activity — 7/30-day performance, trend vs. previous week.',
@@ -2011,7 +2212,6 @@ const TR = {
   'Wochenrückblick — Bewegung der letzten 7 Tage, Prognose und offene Punkte.': 'Weekly review — last 7 days, forecast and open items.',
   'Aufgaben je Modell und global — zentral gebündelt.': 'Tasks per model and global — in one place.',
   'Von der Idee bis Archiviert. Geplante Produkte werden beim Pull automatisch mit dem echten Modell verschmolzen (Titel-Abgleich).': 'From idea to archived. Planned products merge with the real model on sync (title match).',
-  'Alle erfassten Upload-Änderungen chronologisch. Einträge pro Modell im Detail.': 'All recorded upload changes in chronological order. Per-model detail.',
   'Tagesübersicht: offene Zahlungen, fällige Aufgaben, Hinweise und Änderungen.': 'Daily overview: open payments, due tasks, alerts and changes.',
   'Kontakte, Projekte und Aufträge im CRM.': 'Contacts, projects and orders in the CRM.',
   'Pipeline von Neu bis Gewonnen/Verloren — Stufe je Karte änderbar.': 'Pipeline from New to Won/Lost — stage editable per card.',
@@ -2030,6 +2230,9 @@ const TR = {
   'Neu': 'New', 'Kontaktiert': 'Contacted', 'Angebot': 'Quote', 'Gewonnen': 'Won', 'Verloren': 'Lost',
   'Freund': 'Friend', 'Empfehlung': 'Referral', 'Manuell': 'Manual',
   'Anfrage': 'Request', 'Modellieren': 'Modeling', 'Drucken': 'Printing', 'Fertig': 'Done', 'Abgebrochen': 'Cancelled',
+  'Ausgeliefert / Archiviert': 'Delivered / Archived',
+  'Nicht bezahlt: Ausliefern/Archivieren erst nach Zahlung möglich.': 'Not paid: delivering/archiving is only possible once paid.',
+  'Erst nach Zahlung: „Bezahlt" setzen — Ausliefern läuft über die Aufgabe.': 'Only after payment: set "Paid" — delivery goes through the task.',
   'Angefragt': 'Requested', 'Bestätigt': 'Confirmed', 'Versendet': 'Shipped', 'Bezahlt': 'Paid', 'Storniert': 'Cancelled', 'Offen': 'Open',
   'Magnet': 'Magnet', 'Schraube': 'Screw', 'Metallteil': 'Metal part', 'Elektronik': 'Electronics', 'Sonstiges': 'Other',
   'Filament': 'Filament', 'Drucker': 'Printer', 'Zubehör': 'Accessories', 'Versand': 'Shipping',
@@ -2061,7 +2264,7 @@ const TR = {
   'Punkte offen': 'Points open', 'Verlust (Gratis)': 'Loss (free)', 'aus verknüpften Modellen': 'from linked models',
   'direkt + MakerWorld': 'direct + MakerWorld', 'direkt − Material + MW': 'direct − material + MW', 'noch nicht ausgezahlt': 'not yet paid out',
   // Spalten
-  'Name': 'Name', 'Quelle': 'Source', 'Stufe': 'Stage', 'Best.': 'Ord.', 'Umsatz': 'Revenue', 'bezahlt': 'paid', 'letzte Best.': 'last order',
+  'Name': 'Name', 'Quelle': 'Source', 'Stufe': 'Stage', 'Umsatz': 'Revenue', 'bezahlt': 'paid',
   'Datum': 'Date', 'Kategorie': 'Category', 'Betrag': 'Amount', 'Notiz': 'Note', 'Menge': 'Qty', 'Position': 'Item', 'Modell': 'Model',
   'Kunde': 'Customer', 'Proj.': 'Proj.', 'Einheit': 'Unit', 'Marke': 'Brand', 'Farbe': 'Color', 'MakerWorld €': 'MakerWorld €', 'netto': 'net',
   // Buttons
@@ -2079,7 +2282,7 @@ const TR = {
   'Wochen-Report gesendet.': 'Weekly report sent.', 'Erst ein Modell wählen.': 'Select a model first.', 'Kein passendes Modell gefunden.': 'No matching model found.',
   'Farbe angeben.': 'Enter a color.', 'Bitte gültige Werte.': 'Please enter valid values.', 'Keine Tabelle gefunden.': 'No table found.',
   'Popup blockiert — bitte Popups erlauben.': 'Popup blocked — please allow popups.', 'läuft schon': 'already running',
-  'Als geplantes Produkt angelegt (erscheint unter Produkte)': 'Created as a planned product (appears under Products)', 'Als veröffentlicht markiert': 'Marked as published',
+  'Als geplantes Modell angelegt (erscheint unter Ideen & Entwürfe)': 'Created as a planned product (appears under Products)', 'Als veröffentlicht markiert': 'Marked as published',
   // Leerzustände / Hinweise
   'Keine Ausgaben.': 'No expenses.', 'Keine Auszahlungen.': 'No payouts.', 'Keine Projekte.': 'No projects.', 'Keine Teile.': 'No parts.',
   'Keine offenen Drucke': 'No open prints', 'Noch keine Spulen erfasst. Unten eine Spule anlegen.': 'No spools yet. Add one below.', 'kein Modell verknüpft': 'no model linked',
@@ -2100,7 +2303,7 @@ const TR = {
   'Neues Projekt …': 'New project …', 'Aufgabe zum Projekt …': 'Task for project …', 'z.B. Rückruf, Lieferung …': 'e.g. callback, delivery …',
   'Farbe (z.B. Schwarz)': 'Color (e.g. black)', 'Notizen …': 'Notes …', 'Öffne Fenster …': 'Opening window …', 'starte …': 'starting …',
   'Rest gesamt': 'Remaining total', 'Preis runden': 'Round price', 'keine Rundung': 'no rounding', 'Kalkulations-Parameter': 'Costing parameters',
-  'Projekt löschen?': 'Delete project?', 'Kunde inkl. Projekte & Bestellungen löschen?': 'Delete customer incl. projects & orders?',
+  'Projekt löschen?': 'Delete project?', 'Kunde inkl. Projekten löschen?': 'Delete customer incl. projects?',
   'Öffnet ein echtes Chrome-Fenster. Oben rechts „Sign In", normal anmelden (Passkey funktioniert). Login wird gespeichert.': 'Opens a real Chrome window. Click "Sign In" top right and log in normally (passkey works). The login is saved.',
   'Läuft solange der Server läuft. Auf dem Pi als Dienst dauerhaft.': 'Runs while the server runs. Permanent as a service on the Pi.',
   // Präfixe für "Label (N …)"-Überschriften (siehe t()-Fallback)
@@ -2110,14 +2313,14 @@ const TR = {
   // Modell-Detail
   'Todos': 'Tasks', 'täglich': 'daily', 'kumuliert': 'cumulative', 'autospeichern': 'auto-save', 'Gesamt': 'Total',
   'Änderungs-Timeline': 'Change timeline', 'Umrechnungskurse': 'Conversion rates', 'Impr': 'Impr', 'DL': 'DL',
-  'Verdient (Lifetime)': 'Earned (lifetime)', 'Kommentare': 'Comments', '1 Jahr': '1 year', '1 Monat': '1 month',
+  'Verdient gesamt': 'Earned (lifetime)', 'Kommentare': 'Comments', '1 Jahr': '1 year', '1 Monat': '1 month',
   'Was geändert?': 'What changed?', 'Notiz (optional)': 'Note (optional)', '+ Eintrag': '+ Entry',
   'automatisch erkannt': 'auto-detected', 'öffnen': 'open', 'Ziele & Gruppe': 'Goals & group', 'Gruppe': 'Group',
   'Speichern': 'Save', 'Status': 'Status', 'Release': 'Release', 'zuletzt bearbeitet': 'last edited',
   // Heute-Kacheln + Insight-Titel (Fließtext dahinter bleibt datengetrieben)
   'offene Zahlungen': 'open payments', 'überfällige Aufgaben': 'overdue tasks', 'offene Aufgaben': 'open tasks',
   'Zugpferd': 'Top performer', 'CTR-Chance': 'CTR opportunity', 'Nächster Gutschein': 'Next voucher',
-  'Stärkster Tag': 'Strongest tag', 'Top-Verdiener': 'Top earner', 'Verliert an Fahrt': 'Losing momentum',
+  'Bester Hashtag': 'Best hashtag', 'Top-Verdiener': 'Top earner', 'Verliert an Fahrt': 'Losing momentum',
   // Path-Leiste / Produkt-Detail-Aktionen
   'Stufe abschließen': 'Complete stage', 'Abgeschlossen': 'Completed', 'Abschlussdatum': 'Close date',
   'Duplizieren': 'Clone', 'Löschen': 'Delete', 'Dupliziert': 'Cloned', 'Gelöscht': 'Deleted',
@@ -2127,7 +2330,7 @@ const TR = {
   // Punkte-Matrix
   'Punkte-Matrix (Reverse Engineering)': 'Points Matrix (Reverse Engineering)', 'Punkte / Download': 'Points / download',
   'Punkte / Druck': 'Points / print', 'Prognose Punkte · 30 T': 'Forecast points · 30 d', 'Datenpunkte (Tage)': 'Data points (days)',
-  'Herkunft der Punkte (Lifetime)': 'Source of points (lifetime)', 'Modell (Downloads)': 'Model (downloads)',
+  'Herkunft der Punkte (gesamt)': 'Source of points (lifetime)', 'Modell (Downloads)': 'Model (downloads)',
   'Druckprofil (Drucke)': 'Print profile (prints)', 'Bewertungen': 'Ratings', 'Sonstige': 'Other',
   'Punkte-Timing & Prognose je Modell': 'Point timing & forecast per model', 'Punkte-Tage': 'Point days',
   'Ø Abstand': 'Avg. gap', 'letzter': 'last', 'Tage her': 'days ago', 'Prognose 30 T': 'Forecast 30 d',
@@ -2137,7 +2340,7 @@ const TR = {
   'Datei entfernt': 'File removed', 'Nur .3mf-Dateien.': 'Only .3mf files.', '— zum Download im Statuslink': '— for download in the status link',
   // Eigenprojekte + Prioritäten/Deadlines
   'Eigenprojekt': 'Own project', 'Eigenprojekte': 'Own Projects', '+ Eigenprojekt': '+ Own project', 'Neues Eigenprojekt …': 'New own project …',
-  'Eigene Produkte planen: modellieren, drucken, fotografieren, MakerWorld-Eintrag erstellen und veröffentlichen. Ohne Kunde.': 'Plan your own products: model, print, photograph, create the MakerWorld entry and publish. No customer.',
+  'Eigene Modelle planen: modellieren, drucken, fotografieren, MakerWorld-Eintrag erstellen und veröffentlichen. Ohne Kunde.': 'Plan your own products: model, print, photograph, create the MakerWorld entry and publish. No customer.',
   'Idee': 'Idea', 'Fotos': 'Photos', 'MW-Eintrag': 'MW entry', 'Veröffentlicht': 'Published',
   'Priorität': 'Priority', 'Prio': 'Prio', 'Deadline': 'Deadline', 'Abschluss': 'Closed',
   'Dringend': 'Urgent', 'Hoch': 'High', 'Normal': 'Normal', 'Niedrig': 'Low',
@@ -2145,7 +2348,51 @@ const TR = {
   'noch nicht veröffentlicht': 'not yet published', 'Kosten ': 'Cost ', 'heute': 'today', 'überfällig': 'overdue'
 };
 
+// ---- Barrierefreiheit: Labels, Dialog-Fokus ------------------------------------
+// Felder ohne Beschriftung bekommen automatisch ein aria-label (Placeholder, Titel, Label in der Zeile oder
+// Spaltenkopf); Diagramme einen Text aus der Kartenueberschrift. Laeuft nach jedem Rendern (gedrosselt).
+function autoLabel() {
+  document.querySelectorAll('input:not([type=hidden]):not([aria-label]), select:not([aria-label]), textarea:not([aria-label])').forEach(f => {
+    if ((f.labels && f.labels.length) || f.closest('label')) return;
+    let txt = f.getAttribute('placeholder') || f.getAttribute('title') || '';
+    if (!txt) { let p = f.previousElementSibling; while (p && p.tagName !== 'LABEL') p = p.previousElementSibling; txt = p ? p.textContent : ''; }
+    if (!txt) { const row = f.closest('.row, .checkline'); const lb = row && row.querySelector('label'); txt = lb ? lb.textContent : ''; }
+    if (!txt && f.closest('td')) { const td = f.closest('td'), th = td.closest('table')?.querySelectorAll('thead th')[td.cellIndex]; txt = th ? th.textContent : ''; }
+    if (!txt) { const card = f.closest('.card'); txt = card?.querySelector('.hd')?.textContent || ''; }
+    if (!txt) { const kc = f.closest('.kcard'); if (kc) txt = 'Stufe von ' + (kc.querySelector('.kt')?.textContent || 'Karte'); }
+    if (!txt) { const ps = f.previousElementSibling; txt = ps && ps.tagName !== 'INPUT' && ps.tagName !== 'SELECT' ? ps.textContent : ''; }
+    if (!txt && f.type === 'date') txt = 'Datum';
+    if (txt) f.setAttribute('aria-label', txt.replace(/\s+/g, ' ').trim().slice(0, 80));
+  });
+  document.querySelectorAll('canvas:not([aria-label])').forEach(cv => { cv.setAttribute('role', 'img'); cv.setAttribute('aria-label', (cv.closest('.card')?.querySelector('.hd')?.textContent || 'Diagramm').replace(/\s+/g, ' ').trim()); });
+  document.querySelectorAll('th:not([title])').forEach(th => { const k = th.textContent.replace(/[▾▴]/g, '').trim(); if (COL_TIPS[k]) th.title = t(COL_TIPS[k]); });
+  document.querySelectorAll('.stat .l:not([title])').forEach(l => { const k = l.textContent.trim(); const tip = STAT_TIPS[k]; if (tip) l.title = t(tip); });
+  document.querySelectorAll('.close:not([aria-label])').forEach(c => c.setAttribute('aria-label', t('Schließen')));
+  const di = document.querySelector('#drawer .drawer-inner'); const h = di && (di.querySelector('.dh h1') || di.querySelector('.dh input'));
+  if (di && h) di.setAttribute('aria-label', (h.textContent || h.value || 'Details').trim().slice(0, 80));
+}
+let _alRaf = 0;
+new MutationObserver(() => { if (!_alRaf) _alRaf = requestAnimationFrame(() => { _alRaf = 0; autoLabel(); }); }).observe(document.body, { childList: true, subtree: true });
+
+// Drawer = modaler Dialog: Fokus hinein beim Oeffnen, zurueck beim Schliessen, Tab bleibt im Dialog.
+let _drawerReturn = null;
+new MutationObserver(() => {
+  const d = document.getElementById('drawer'), open = !d.classList.contains('hidden');
+  if (open && !d.dataset.open) { d.dataset.open = '1'; _drawerReturn = document.activeElement; setTimeout(() => d.querySelector('.drawer-inner').focus({ preventScroll: true }), 30); }
+  else if (!open && d.dataset.open) { delete d.dataset.open; if (_drawerReturn && document.contains(_drawerReturn)) _drawerReturn.focus({ preventScroll: true }); _drawerReturn = null; }
+}).observe(document.getElementById('drawer'), { attributes: true, attributeFilter: ['class'] });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeMenu();
+  const d = document.getElementById('drawer');
+  if (e.key !== 'Tab' || d.classList.contains('hidden') || document.querySelector('.modal-scrim')) return;
+  const f = [...d.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),select:not([disabled]),textarea:not([disabled]),[tabindex="0"]')].filter(x => x.offsetParent !== null);
+  if (!f.length) return;
+  const first = f[0], last = f[f.length - 1], inside = d.contains(document.activeElement);
+  if (e.shiftKey && (document.activeElement === first || !inside || document.activeElement === d.querySelector('.drawer-inner'))) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && (document.activeElement === last || !inside)) { e.preventDefault(); first.focus(); }
+});
+
 // ---- Start ----
 setupSearch();
 applyNavLang();
-(async () => { await loadOverview(); const route = location.hash.slice(1) || 'heute'; go(routes[route] ? route : 'heute'); pollPull(); })();
+(async () => { await loadOverview(); const route = location.hash.slice(1) || 'heute'; go(route); pollPull(); autoLabel(); })();

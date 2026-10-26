@@ -1,0 +1,10 @@
+[Unit]
+Description=MakerWorld Analytics - taegliches DB-Backup
+
+[Service]
+Type=oneshot
+User=youruser
+Environment=APP_DIR=/home/youruser/makerworld-analytics-app
+ExecStart=/home/youruser/makerworld-analytics-app/scripts/backup.sh
+Nice=19
+IOSchedulingClass=idle
