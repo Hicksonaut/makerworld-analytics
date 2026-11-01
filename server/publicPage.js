@@ -4,9 +4,10 @@
 // Design: dunkle Karte (oklch), Fortschritts-Stepper. Bei kind='modell'
 // (nur Modellarbeit, kein Druck) entfällt die Druck-Stufe + der Fortschrittsbalken.
 import { db, getSetting } from './db.js';
+import { T, LOCALE, lang } from './i18n.js';
 
 const esc = x => String(x ?? '').replace(/[<>&"']/g, m => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' }[m]));
-const NOT_FOUND = '<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:oklch(0.19 0.012 260);color:oklch(0.7 0.012 260);font:15px -apple-system,BlinkMacSystemFont,sans-serif">Dieser Link ist nicht (mehr) gültig.</body>';
+const notFound = () => '<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><body style="margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:oklch(0.19 0.012 260);color:oklch(0.7 0.012 260);font:15px -apple-system,BlinkMacSystemFont,sans-serif">' + T('Dieser Link ist nicht (mehr) gültig.', 'This link is no longer valid.') + '</body>';
 
 const CHECK = '<svg width="11" height="9" viewBox="0 0 11 9" fill="none"><path d="M1 4.5L4 7.5L10 1" stroke="white" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
@@ -22,14 +23,14 @@ export function projectFileByToken(token) {
 
 export function renderStatus(token) {
   const p = db.prepare('SELECT * FROM projects WHERE share_token=?').get(token);
-  if (!token || !p) return { code: 404, html: NOT_FOUND };
+  if (!token || !p) return { code: 404, html: notFound() };
   let seller = {}; try { seller = JSON.parse(getSetting('invoice_seller', '{}')); } catch {}
   const items = db.prepare('SELECT i.label, m.title AS model_title, i.qty, i.printed_qty FROM project_items i LEFT JOIN models m ON m.design_id=i.design_id WHERE i.project_id=? ORDER BY i.sort,i.id').all(p.id);
 
   const modelOnly = p.kind === 'modell';   // nur Modellarbeit -> keine Druck-Stufe/Fortschritt
   const STAGE_DEFS = modelOnly
-    ? [{ key: 'anfrage', name: 'Anfrage' }, { key: 'modellierung', name: 'In Modellierung' }, { key: 'fertig', name: 'Fertig' }]
-    : [{ key: 'anfrage', name: 'Anfrage' }, { key: 'modellierung', name: 'In Modellierung' }, { key: 'druck', name: 'Wird gedruckt' }, { key: 'fertig', name: 'Fertig' }];
+    ? [{ key: 'anfrage', name: T('Anfrage', 'Request') }, { key: 'modellierung', name: T('In Modellierung', 'Being modelled') }, { key: 'fertig', name: T('Fertig', 'Done') }]
+    : [{ key: 'anfrage', name: T('Anfrage', 'Request') }, { key: 'modellierung', name: T('In Modellierung', 'Being modelled') }, { key: 'druck', name: T('Wird gedruckt', 'Being printed') }, { key: 'fertig', name: T('Fertig', 'Done') }];
   const order = STAGE_DEFS.map(s => s.key);
   let cur = p.stage;
   if (!order.includes(cur)) cur = (cur === 'druck') ? 'modellierung' : (cur === 'fertig' ? 'fertig' : 'anfrage');
@@ -39,17 +40,17 @@ export function renderStatus(token) {
     const done = i <= curIdx, current = i === curIdx, lineOn = i < curIdx, showLine = i < STAGE_DEFS.length - 1;
     const cls = ['step', done ? 'done' : '', current ? 'current' : '', lineOn ? 'lineon' : ''].filter(Boolean).join(' ');
     return `<div class="${cls}"><div class="col"><div class="dot">${done ? CHECK : ''}</div>${showLine ? '<div class="line"></div>' : ''}</div>`
-      + `<div class="body"><div class="slabel">${esc(s.name)}</div>${current ? '<div class="cur">Aktueller Schritt</div>' : ''}</div></div>`;
+      + `<div class="body"><div class="slabel">${esc(s.name)}</div>${current ? `<div class="cur">${T('Aktueller Schritt', 'Current step')}</div>` : ''}</div></div>`;
   }).join('');
 
   const showProgress = !modelOnly && cur === 'druck';
   const totalQ = items.reduce((a, i) => a + (i.qty || 0), 0), doneQ = items.reduce((a, i) => a + (i.printed_qty || 0), 0);
   const pct = totalQ ? Math.round((doneQ / totalQ) * 100) : 0;
   const progressHtml = showProgress
-    ? `<div class="prog"><div class="track"><div class="fill" style="width:${pct}%"></div></div><div class="plabel">${pct}% (${doneQ}/${totalQ} gedruckt)</div></div>` : '';
+    ? `<div class="prog"><div class="track"><div class="fill" style="width:${pct}%"></div></div><div class="plabel">${pct}% (${doneQ}/${totalQ} ${T('gedruckt', 'printed')})</div></div>` : '';
 
   const itemsHtml = items.length
-    ? `<div class="items">${items.map(i => `<div class="item"><div>${esc(i.label || i.model_title || 'Position')}</div><div class="iqty">×${i.qty}</div></div>`).join('')}</div>` : '';
+    ? `<div class="items">${items.map(i => `<div class="item"><div>${esc(i.label || i.model_title || T('Position', 'Item'))}</div><div class="iqty">×${i.qty}</div></div>`).join('')}</div>` : '';
 
   // .3mf-Download (nur Modellarbeit): Datei sichtbar hochgeladen, Download erst nach Zahlung.
   // Kostenlose Aufträge haben nichts zu bezahlen -> Download direkt freigeschaltet.
@@ -57,22 +58,22 @@ export function renderStatus(token) {
   const settled = !!p.paid || p.margin_tier === 'kostenlos' || (price0 != null && price0 <= 0);
   const fileHtml = (modelOnly && p.file_name)
     ? (settled
-      ? `<a class="dl" href="/p/${esc(token)}/file">3D-Datei herunterladen (.3mf)</a>`
-      : `<div class="dl locked"><span class="lk"><svg width="12" height="12" viewBox="0 0 14 16" fill="none"><path d="M3.5 7V4.5a3.5 3.5 0 0 1 7 0V7" stroke="currentColor" stroke-width="1.6"/><rect x="1.5" y="7" width="11" height="8" rx="1.5" fill="currentColor"/></svg> Datei hochgeladen</span><span class="ls">Download nach Zahlung freigeschaltet</span></div>`)
+      ? `<a class="dl" href="/p/${esc(token)}/file">${T('3D-Datei herunterladen (.3mf)', 'Download 3D file (.3mf)')}</a>`
+      : `<div class="dl locked"><span class="lk"><svg width="12" height="12" viewBox="0 0 14 16" fill="none"><path d="M3.5 7V4.5a3.5 3.5 0 0 1 7 0V7" stroke="currentColor" stroke-width="1.6"/><rect x="1.5" y="7" width="11" height="8" rx="1.5" fill="currentColor"/></svg> ${T('Datei hochgeladen', 'File uploaded')}</span><span class="ls">${T('Download nach Zahlung freigeschaltet', 'Download unlocked after payment')}</span></div>`)
     : '';
 
   const price = p.price != null ? p.price : null;
   const free = p.margin_tier === 'kostenlos' || (price != null && price <= 0);
   const priceHtml = price != null
-    ? `<div class="price-row"><div class="price-k">Preis</div><div class="price-v">${free ? 'kostenlos' : price.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'}</div></div>` : '';
+    ? `<div class="price-row"><div class="price-k">${T('Preis', 'Price')}</div><div class="price-v">${free ? T('kostenlos', 'free') : price.toLocaleString(LOCALE(), { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' €'}</div></div>` : '';
 
   const paid = !!p.paid;
   const stageLabel = STAGE_DEFS[curIdx].name;
   const email = seller.email || '';
 
-  const html = `<!doctype html><html lang=de><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+  const html = `<!doctype html><html lang=${lang()}><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
 <meta name=robots content="noindex,nofollow">
-<title>Auftragsstatus — ${esc(p.title)}</title><style>
+<title>${T('Auftragsstatus', 'Order status')} — ${esc(p.title)}</title><style>
 *{box-sizing:border-box}
 body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:48px 20px;
   background:oklch(0.19 0.012 260);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
@@ -116,16 +117,16 @@ h1{margin:2px 0 14px;font-size:23px;line-height:1.25;font-weight:700;color:oklch
 .dl.locked .ls{font-size:11px;font-weight:400}
 </style></head><body><div class=wrap>
   <div class=card>
-    <div class=top><div class=cust>${esc(seller.name || 'Auftragsstatus')}</div>${free ? '' : `<div class="badge ${paid ? 'paid' : 'open'}">${paid ? 'bezahlt' : 'offen'}</div>`}</div>
+    <div class=top><div class=cust>${esc(seller.name || T('Auftragsstatus', 'Order status'))}</div>${free ? '' : `<div class="badge ${paid ? 'paid' : 'open'}">${paid ? T('bezahlt', 'paid') : T('offen', 'open')}</div>`}</div>
     <h1>${esc(p.title)}</h1>
-    <div class=status>Status: <b>${esc(stageLabel)}</b></div>
+    <div class=status>${T('Status', 'Status')}: <b>${esc(stageLabel)}</b></div>
     ${progressHtml}
     <div class=steps>${stagesHtml}</div>
     ${itemsHtml}
     ${fileHtml}
     ${priceHtml}
   </div>
-  <div class=foot>Live-Status deines 3D-Druck-Auftrags${email ? ' · Fragen? <a href="mailto:' + esc(email) + '">' + esc(email) + '</a>' : ''}</div>
+  <div class=foot>${T('Live-Status deines 3D-Druck-Auftrags', 'Live status of your 3D printing order')}${email ? ' · ' + T('Fragen?', 'Questions?') + ' <a href="mailto:' + esc(email) + '">' + esc(email) + '</a>' : ''}</div>
 </div></body></html>`;
   return { code: 200, html };
 }

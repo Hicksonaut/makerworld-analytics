@@ -9,7 +9,9 @@
     "start:public": "node server/public.js",
     "seed:demo": "node server/seed-demo.js",
     "login": "node server/scraper.js --login",
-    "pull": "node server/scraper.js --pull"
+    "pull": "node server/scraper.js --pull",
+    "test": "node --test tests/api.test.mjs tests/operations.test.mjs",
+    "test:ui": "node --test --test-concurrency=1 tests/ui.test.mjs tests/i18n.test.mjs"
   },
   "license": "MIT",
   "engines": { "node": ">=18" },

@@ -4,7 +4,8 @@ import cron from 'node-cron';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { db, DATA_DIR, getSetting, setSetting, nowIso } from './db.js';
-import { crm } from './crm.js';
+import { crm, isAutoDeliver } from './crm.js';
+import { langMiddleware, T, num, dateLocal, LOCALE } from './i18n.js';
 import { trashPut, trashRestore, trashPurge, trashList, purgeOld, newAcc, addRows, rowsOf } from './trash.js';
 import { renderStatus, projectFileByToken } from './publicPage.js';
 import fs from 'fs';
@@ -26,15 +27,16 @@ const hostOnly = h => { h = String(h || '').toLowerCase(); return h.startsWith('
 const PRIVATE_HOST = new RegExp('^(localhost|127(\\.\\d+){3}|\\[::1\\]|10(\\.\\d+){3}|192\\.168(\\.\\d+){2}|172\\.(1[6-9]|2\\d|3[01])(\\.\\d+){2}'
   + '|169\\.254(\\.\\d+){2}|100\\.(6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])(\\.\\d+){2}|\\[(fd|fe80)[0-9a-f:]*\\]|[^.]+|.+\\.(local|lan|fritz\\.box|home\\.arpa|ts\\.net))$');
 const hostAllowed = h => PRIVATE_HOST.test(h) || EXTRA_HOSTS.includes(h);
+app.use(langMiddleware);
 app.use((req, res, next) => {
   const host = hostOnly(req.headers.host);
-  if (!hostAllowed(host)) { console.log('[security] Host abgelehnt:', req.headers.host); return res.status(403).type('text').send('Host nicht erlaubt.'); }
+  if (!hostAllowed(host)) { console.log('[security] Host abgelehnt:', req.headers.host); return res.status(403).type('text').send(T('Host nicht erlaubt.', 'Host not allowed.')); }
   res.set({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'same-origin', 'Content-Security-Policy': "frame-ancestors 'none'" });
   if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
     const origin = req.headers.origin;
     let bad = req.headers['sec-fetch-site'] === 'cross-site' || origin === 'null';
     if (origin && origin !== 'null') { try { bad = bad || new URL(origin).host !== req.headers.host; } catch { bad = true; } }
-    if (bad) { console.log('[security] Fremde Herkunft abgelehnt:', req.method, req.url, origin); return res.status(403).json({ error: 'Anfrage von fremder Herkunft abgelehnt.' }); }
+    if (bad) { console.log('[security] Fremde Herkunft abgelehnt:', req.method, req.url, origin); return res.status(403).json({ error: T('Anfrage von fremder Herkunft abgelehnt.', 'Request from a foreign origin rejected.') }); }
   }
   next();
 });
@@ -68,25 +70,25 @@ async function waitForRam(onLog) {
   for (let i = 0; i < 20; i++) {                 // bis zu 10 Minuten (20 x 30 s)
     const m = memAvailableMb();
     if (m == null || m >= PULL_MIN_RAM_MB) return true;
-    if (i === 0) onLog(`Wenig freier RAM (${m} MB, benoetigt ~${PULL_MIN_RAM_MB} MB) - warte ...`);
+    if (i === 0) onLog(T(`Wenig freier RAM (${m} MB, benötigt ~${PULL_MIN_RAM_MB} MB) - warte ...`, `Low free RAM (${m} MB, needs ~${PULL_MIN_RAM_MB} MB) - waiting ...`));
     await new Promise(r => setTimeout(r, +process.env.PULL_RAM_WAIT_MS || 30000));
   }
   return false;
 }
 
 async function startPull(mode) {
-  if (pullState.running) return { started: false, reason: 'Ein Pull laeuft bereits.' };
+  if (pullState.running) return { started: false, reason: T('Ein Pull läuft bereits.', 'A pull is already running.') };
   pullState.running = true; pullState.mode = mode; pullState.startedAt = nowIso(); pullState.log = [];
-  pushLog(`Pull gestartet (${mode}) ...`);
+  pushLog(T(`Pull gestartet (${mode}) ...`, `Pull started (${mode}) ...`));
   let timedOut = false;
   let watchdog = setTimeout(async () => {
     timedOut = true;
-    pushLog(`WATCHDOG: Pull laeuft laenger als ${PULL_TIMEOUT_MS / 60000} Min - wird abgebrochen.`);
-    try { const { abortPull } = await import('./scraper.js'); await abortPull(); } catch (e) { pushLog('Abbruch: ' + e.message); }
+    pushLog(T(`WATCHDOG: Pull läuft länger als ${PULL_TIMEOUT_MS / 60000} Min - wird abgebrochen.`, `WATCHDOG: pull has been running longer than ${PULL_TIMEOUT_MS / 60000} min - aborting.`));
+    try { const { abortPull } = await import('./scraper.js'); await abortPull(); } catch (e) { pushLog(T('Abbruch: ', 'Abort: ') + e.message); }
     // Falls runPull trotzdem nicht zurueckkehrt: Zustand nach 60 s zwangsweise freigeben.
     setTimeout(() => {
       if (!pullState.running) return;
-      pushLog('WATCHDOG: Zustand zwangsweise zurueckgesetzt.');
+      pushLog(T('WATCHDOG: Zustand zwangsweise zurückgesetzt.', 'WATCHDOG: state forcibly reset.'));
       closeStaleRuns('Watchdog-Timeout');
       pullState.lastResult = { ok: false, error: 'Watchdog-Timeout', at: nowIso() }; pullState.running = false;
     }, 60000);
@@ -94,22 +96,22 @@ async function startPull(mode) {
   (async () => {
     try {
       if (!(await waitForRam(pushLog))) {
-        const msg = `Zu wenig freier Arbeitsspeicher (< ${PULL_MIN_RAM_MB} MB) - Pull nicht gestartet.`;
+        const msg = T(`Zu wenig freier Arbeitsspeicher (< ${PULL_MIN_RAM_MB} MB) - Pull nicht gestartet.`, `Not enough free memory (< ${PULL_MIN_RAM_MB} MB) - pull not started.`);
         const now = nowIso();   // als Fehlerlauf in die Historie, damit Systemhinweise/Health es zeigen
-        db.prepare(`INSERT INTO pull_runs(started_at,finished_at,status,mode,models_ok,models_failed,log) VALUES(?,?,?,?,0,0,?)`).run(now, now, 'error', mode, 'ABBRUCH: ' + msg);
+        db.prepare(`INSERT INTO pull_runs(started_at,finished_at,status,mode,models_ok,models_failed,log) VALUES(?,?,?,?,0,0,?)`).run(now, now, 'error', mode, T('ABBRUCH: ', 'ABORTED: ') + msg);
         throw new Error(msg);
       }
       const { runPull } = await import('./scraper.js');   // lazy: Server startet auch ohne Playwright
       const res = await runPull({ mode, onLog: pushLog });
       pullState.lastResult = { ok: true, ...res, at: nowIso() };
-      try { await checkMilestones(); } catch (e) { pushLog('Meilenstein-Check: ' + e.message); }
+      try { await checkMilestones(); } catch (e) { pushLog(T('Meilenstein-Check: ', 'Milestone check: ') + e.message); }
       try { await sendDigest('pull'); } catch {}   // Digest/Push nach erfolgreichem Pull
     } catch (e) {
-      const msg = timedOut ? `Watchdog: Pull nach ${+(PULL_TIMEOUT_MS / 60000).toFixed(1)} Min abgebrochen (${e.message})` : e.message;
-      pushLog('Fehler: ' + msg);
+      const msg = timedOut ? T(`Watchdog: Pull nach ${+(PULL_TIMEOUT_MS / 60000).toFixed(1)} Min abgebrochen (${e.message})`, `Watchdog: pull aborted after ${+(PULL_TIMEOUT_MS / 60000).toFixed(1)} min (${e.message})`) : e.message;
+      pushLog(T('Fehler: ', 'Error: ') + msg);
       pullState.lastResult = { ok: false, error: msg, at: nowIso() };
       if (timedOut) db.prepare("UPDATE pull_runs SET log=COALESCE(log,'') || ? WHERE id=(SELECT MAX(id) FROM pull_runs)").run('\n' + msg);
-      try { await pushNotify('MakerWorld Pull fehlgeschlagen', msg); } catch {}
+      try { await pushNotify(T('MakerWorld Pull fehlgeschlagen', 'MakerWorld pull failed'), msg); } catch {}
     } finally { clearTimeout(watchdog); pullState.running = false; }
   })();
   return { started: true };
@@ -275,7 +277,7 @@ app.get('/api/model/:id/instances', (req, res) => res.json(modelInstances(req.pa
 app.get('/api/model/:id', (req, res) => {
   const id = req.params.id;
   const model = db.prepare('SELECT * FROM models WHERE design_id = ?').get(id);
-  if (!model) return res.status(404).json({ error: 'unbekanntes Modell' });
+  if (!model) return res.status(404).json({ error: T('unbekanntes Modell', 'unknown model') });
   // Momentum (dl30/v30/pts30/v_trend) + Prognose + Verdienst fuer die Detailseite.
   attachMomentum([model]); attachForecast([model]);
   const pt = db.prepare('SELECT point FROM snapshots WHERE design_id=? ORDER BY id DESC LIMIT 1').get(id);
@@ -357,7 +359,7 @@ app.get('/api/events', (req, res) => {
 });
 app.post('/api/events', (req, res) => {
   const { design_id, date, type, title, note } = req.body || {};
-  if (!date) return res.status(400).json({ error: 'date fehlt' });
+  if (!date) return res.status(400).json({ error: T('Datum fehlt', 'date missing') });
   const r = db.prepare(`INSERT INTO events(design_id,date,type,title,note,created_at) VALUES(?,?,?,?,?,?)`)
     .run(design_id || null, date, type || 'other', title || '', note || '', nowIso());
   res.json(db.prepare('SELECT * FROM events WHERE id=?').get(r.lastInsertRowid));
@@ -381,19 +383,19 @@ function computeAlerts(models) {
   for (const m of models) {
     const age = m.publish_date ? Math.round((Date.now() - Date.parse(m.publish_date)) / 86400000) : 0;
     if (m.v_trend != null && m.v_trend >= 60 && m.v7 >= 80)
-      out.push({ type: 'hot', design_id: m.design_id, title: m.title, text: `läuft heiß: Views +${m.v_trend}% ggü. Vorwoche` });
+      out.push({ type: 'hot', design_id: m.design_id, title: m.title, text: T(`läuft heiß: Views +${m.v_trend}% ggü. Vorwoche`, `heating up: views +${m.v_trend}% vs. previous week`) });
     if (m.v_trend != null && m.v_trend <= -40 && m.v30 >= 200)
-      out.push({ type: 'cool', design_id: m.design_id, title: m.title, text: `kühlt ab: Views ${m.v_trend}% ggü. Vorwoche` });
+      out.push({ type: 'cool', design_id: m.design_id, title: m.title, text: T(`kühlt ab: Views ${m.v_trend}% ggü. Vorwoche`, `cooling down: views ${m.v_trend}% vs. previous week`) });
     // Stillstand: 0 Downloads in 30 Tagen, obwohl das Modell sonst regelmaessig geladen wird. Statt fester Schwelle
     // zaehlt die Erwartung aus dem Lebensdurchschnitt: Alarm nur, wenn eine Null dabei unwahrscheinlich ist
     // (Poisson: P(0) = e^-erwartet < 10 % <=> erwartet >= 2,3 Downloads je 30 Tage). Sonst ist die Null normales Rauschen.
     const expected30 = age > 0 ? ((m.download || 0) / age) * 30 : 0;
     if (age > 60 && m.dl30 === 0 && expected30 >= 2.3)
-      out.push({ type: 'stall', design_id: m.design_id, title: m.title, text: `keine Downloads in 30 Tagen (üblich: ~${expected30.toFixed(1).replace('.', ',')} je 30 Tage)` });
+      out.push({ type: 'stall', design_id: m.design_id, title: m.title, text: T(`keine Downloads in 30 Tagen (üblich: ~${expected30.toFixed(1).replace('.', ',')} je 30 Tage)`, `no downloads in 30 days (usually ~${expected30.toFixed(1)} per 30 days)`) });
     if (m.goal_download && m.download != null) {
       const p = m.download / m.goal_download;
-      if (p >= 1) out.push({ type: 'goal', design_id: m.design_id, title: m.title, text: `Ziel erreicht: ${m.download}/${m.goal_download} DL` });
-      else if (p >= 0.8) out.push({ type: 'goal_near', design_id: m.design_id, title: m.title, text: `nah am Ziel: ${m.download}/${m.goal_download} DL (${Math.round(p*100)}%)` });
+      if (p >= 1) out.push({ type: 'goal', design_id: m.design_id, title: m.title, text: T(`Ziel erreicht: ${m.download}/${m.goal_download} Downloads`, `goal reached: ${m.download}/${m.goal_download} downloads`) });
+      else if (p >= 0.8) out.push({ type: 'goal_near', design_id: m.design_id, title: m.title, text: T(`nah am Ziel: ${m.download}/${m.goal_download} Downloads (${Math.round(p*100)}%)`, `close to goal: ${m.download}/${m.goal_download} downloads (${Math.round(p*100)}%)`) });
     }
   }
   const rank = { hot: 0, goal: 1, cool: 2, stall: 3, goal_near: 4 };
@@ -421,7 +423,7 @@ app.put('/api/model/:id/status', (req, res) => {
 app.put('/api/model/:id/meta', (req, res) => {
   const { title, description, tags } = req.body || {};
   const cur = db.prepare('SELECT * FROM models WHERE design_id=?').get(req.params.id);
-  if (!cur) return res.status(404).json({ error: 'nicht gefunden' });
+  if (!cur) return res.status(404).json({ error: T('nicht gefunden', 'not found') });
   let tagsJson = cur.tags, tagCount = cur.tag_count;
   if (tags !== undefined) {
     const arr = Array.isArray(tags) ? tags : String(tags).split(',').map(t => t.trim()).filter(Boolean);
@@ -435,7 +437,7 @@ app.put('/api/model/:id/meta', (req, res) => {
 // ---- Geplante Modelle (noch nicht auf MakerWorld) ------------------------
 app.post('/api/products/plan', (req, res) => {
   const { title, status, group_label, notes } = req.body || {};
-  if (!title || !title.trim()) return res.status(400).json({ error: 'Titel fehlt' });
+  if (!title || !title.trim()) return res.status(400).json({ error: T('Titel fehlt', 'title missing') });
   const id = 'plan_' + Date.now().toString(36);
   db.prepare(`INSERT INTO models(design_id,title,status,group_label,notes,planned,created_at,updated_at)
               VALUES(?,?,?,?,?,1,?,?)`)
@@ -445,8 +447,8 @@ app.post('/api/products/plan', (req, res) => {
 // nur geplante Modelle loeschbar (schuetzt echte Daten)
 app.delete('/api/products/:id', (req, res) => {
   const m = db.prepare('SELECT planned FROM models WHERE design_id=?').get(req.params.id);
-  if (!m) return res.status(404).json({ error: 'nicht gefunden' });
-  if (!m.planned) return res.status(400).json({ error: 'nur geplante Modelle löschbar' });
+  if (!m) return res.status(404).json({ error: T('nicht gefunden', 'not found') });
+  if (!m.planned) return res.status(400).json({ error: T('nur geplante Modelle löschbar', 'only planned models can be deleted') });
   const acc = newAcc();
   addRows(acc, 'models', rowsOf('models', 'design_id=?', req.params.id));
   addRows(acc, 'todos', rowsOf('todos', 'design_id=?', req.params.id));
@@ -483,7 +485,7 @@ app.get('/api/model/:id/ctr-impact', (req, res) => {
 app.get('/api/views', (req, res) => res.json(db.prepare('SELECT * FROM views ORDER BY id').all().map(v => ({ ...v, config: v.config ? JSON.parse(v.config) : {} }))));
 app.post('/api/views', (req, res) => {
   const { name, config } = req.body || {};
-  if (!name) return res.status(400).json({ error: 'name fehlt' });
+  if (!name) return res.status(400).json({ error: T('Name fehlt', 'name missing') });
   const r = db.prepare('INSERT INTO views(name,config,created_at) VALUES(?,?,?)').run(name, JSON.stringify(config || {}), nowIso());
   res.json(db.prepare('SELECT * FROM views WHERE id=?').get(r.lastInsertRowid));
 });
@@ -516,21 +518,21 @@ app.get('/api/todos', (req, res) => {
 });
 app.post('/api/todos', (req, res) => {
   const { design_id, contact_id, project_id, title, priority, due_date } = req.body || {};
-  if (!title) return res.status(400).json({ error: 'title fehlt' });
+  if (!title) return res.status(400).json({ error: T('Titel fehlt', 'title missing') });
   const r = db.prepare('INSERT INTO todos(design_id,contact_id,project_id,title,priority,due_date,created_at) VALUES(?,?,?,?,?,?,?)')
     .run(design_id || null, contact_id || null, project_id || null, title, priority ?? 1, due_date || null, nowIso());
   res.json(db.prepare('SELECT * FROM todos WHERE id=?').get(r.lastInsertRowid));
 });
 app.put('/api/todos/:id', (req, res) => {
   const cur = db.prepare('SELECT * FROM todos WHERE id=?').get(req.params.id);
-  if (!cur) return res.status(404).json({ error: 'todo fehlt' });
+  if (!cur) return res.status(404).json({ error: T('Aufgabe nicht gefunden', 'task not found') });
   const b = req.body || {};
   const done = b.done != null ? (b.done ? 1 : 0) : cur.done;
   db.prepare('UPDATE todos SET title=?,done=?,priority=?,due_date=?,done_at=? WHERE id=?').run(
     b.title ?? cur.title, done, b.priority ?? cur.priority, b.due_date ?? cur.due_date,
     done && !cur.done ? nowIso() : (done ? cur.done_at : null), req.params.id);
   // Ausliefer-Aufgabe abgehakt -> Projekt in die Stufe "ausgeliefert" (nur wenn beglichen).
-  if (done && !cur.done && cur.project_id && /^Ausliefern:/.test(cur.title || '')) {
+  if (done && !cur.done && cur.project_id && isAutoDeliver(cur.title)) {
     const pr = db.prepare('SELECT * FROM projects WHERE id=?').get(cur.project_id);
     const settled = pr && (!!pr.paid || pr.margin_tier === 'kostenlos' || (pr.price != null && pr.price <= 0));
     if (pr && settled && pr.stage !== 'ausgeliefert')
@@ -548,8 +550,8 @@ app.delete('/api/todos/:id', (req, res) => {
 // ---- Papierkorb ---------------------------------------------------------------------------
 app.get('/api/trash', (req, res) => { purgeOld(); res.json(trashList()); });
 app.post('/api/trash/:id/restore', (req, res) => {
-  try { const r = trashRestore(+req.params.id); if (!r) return res.status(404).json({ error: 'Nicht (mehr) im Papierkorb.' }); res.json({ ok: true, ...r }); }
-  catch (e) { console.log('[trash] Wiederherstellen fehlgeschlagen:', e.message); res.status(500).json({ error: 'Wiederherstellen fehlgeschlagen: ' + e.message }); }
+  try { const r = trashRestore(+req.params.id); if (!r) return res.status(404).json({ error: T('Nicht (mehr) im Papierkorb.', 'Not (or no longer) in the trash.') }); res.json({ ok: true, ...r }); }
+  catch (e) { console.log('[trash] Wiederherstellen fehlgeschlagen:', e.message); res.status(500).json({ error: T('Wiederherstellen fehlgeschlagen: ', 'Restore failed: ') + e.message }); }
 });
 app.delete('/api/trash/:id', (req, res) => res.json({ ok: trashPurge(+req.params.id) }));
 
@@ -587,8 +589,8 @@ app.get('/api/pull/status', (req, res) => res.json({
   lastRun: db.prepare('SELECT * FROM pull_runs ORDER BY id DESC LIMIT 1').get()
 }));
 app.post('/api/pull/cancel', async (req, res) => {
-  if (!pullState.running) return res.json({ ok: false, reason: 'Es laeuft kein Pull.' });
-  pushLog('Abbruch angefordert ...');
+  if (!pullState.running) return res.json({ ok: false, reason: T('Es läuft kein Pull.', 'No pull is running.') });
+  pushLog(T('Abbruch angefordert ...', 'Abort requested ...'));
   try { const { abortPull } = await import('./scraper.js'); await abortPull(); } catch (e) { return res.status(500).json({ error: e.message }); }
   res.json({ ok: true });
 });
@@ -638,7 +640,8 @@ app.get('/api/settings', (req, res) => res.json({
   weekly_day: +getSetting('weekly_day', '1'),      // 0=So … 1=Mo
   weekly_time: getSetting('weekly_time', '08:00'),
   spool_low_g: +getSetting('spool_low_g', '150'),
-  public_base_url: getSetting('public_base_url', '')
+  public_base_url: getSetting('public_base_url', ''),
+  lang: getSetting('lang', 'de')
 }));
 app.post('/api/settings', (req, res) => {
   const b = req.body || {};
@@ -652,6 +655,7 @@ app.post('/api/settings', (req, res) => {
   if (b.weekly_day != null) setSetting('weekly_day', String(Math.max(0, Math.min(6, +b.weekly_day))));
   if (b.weekly_time != null) setSetting('weekly_time', String(b.weekly_time));
   if (b.spool_low_g != null) setSetting('spool_low_g', String(Math.max(0, +b.spool_low_g)));
+  if (b.lang != null) setSetting('lang', b.lang === 'en' ? 'en' : 'de');
   if (b.public_base_url != null) setSetting('public_base_url', String(b.public_base_url).trim().replace(/\/+$/, ''));
   rescheduleCron(); rescheduleWeekly();
   res.json({ ok: true });
@@ -659,13 +663,13 @@ app.post('/api/settings', (req, res) => {
 // Wochen-Insight-Report als Text (für Push + Vorschau)
 function weeklyText() {
   const ins = buildInsights();
-  const L = [`MakerWorld Wochen-Report — ${new Date().toLocaleDateString('de-DE')}`];
+  const L = [T('MakerWorld Wochen-Report', 'MakerWorld weekly report') + ` — ${dateLocal()}`];
   ins.forEach(i => L.push(`- ${i.title}: ${i.text}`));
-  if (ins.length === 0) L.push('Noch zu wenig Daten für Insights.');
+  if (ins.length === 0) L.push(T('Noch zu wenig Daten für Insights.', 'Not enough data for insights yet.'));
   return L.join('\n');
 }
 app.get('/api/insights/weekly-text', (req, res) => res.json({ text: weeklyText() }));
-app.post('/api/insights/send', async (req, res) => { const text = weeklyText(); const sent = await pushNotify('MakerWorld Wochen-Report', text); res.json({ ok: true, sent, text }); });
+app.post('/api/insights/send', async (req, res) => { const text = weeklyText(); const sent = await pushNotify(T('MakerWorld Wochen-Report', 'MakerWorld weekly report'), text); res.json({ ok: true, sent, text }); });
 
 // ---- Cron: taeglicher Pull ------------------------------------------------
 let cronTask = null;
@@ -690,7 +694,7 @@ function rescheduleWeekly() {
   const expr = `${m || 0} ${h || 8} * * ${day}`;
   weeklyTask = cron.schedule(expr, async () => {
     console.log('[cron] Wochen-Report', new Date().toISOString());
-    try { await pushNotify('MakerWorld Wochen-Report', weeklyText()); } catch (e) { console.log(e.message); }
+    try { await pushNotify(T('MakerWorld Wochen-Report', 'MakerWorld weekly report'), weeklyText()); } catch (e) { console.log(e.message); }
   });
   console.log('[cron] Wochen-Report geplant:', expr);
 }
@@ -719,15 +723,15 @@ function healthData() {
   } catch {}
   const memMb = memAvailableMb();
   const issues = [];
-  if (lastRun?.status === 'error') issues.push({ level: 'error', text: 'Der letzte Pull ist fehlgeschlagen — Details unter „Daten & Pull".' });
-  else if (lastRun?.status === 'running' && !pullState.running) issues.push({ level: 'error', text: 'Ein Pull steht auf „läuft", obwohl keiner aktiv ist (Neustart/Absturz).' });
-  if (pullAgeH == null) issues.push({ level: 'warn', text: 'Noch kein erfolgreicher Pull vorhanden.' });
-  else if (pullAgeH > 36) issues.push({ level: 'error', text: `Der letzte erfolgreiche Pull ist ${Math.round(pullAgeH)} Stunden her — die Zahlen sind veraltet.` });
-  if (!backup) issues.push({ level: 'warn', text: 'Kein Backup gefunden.' });
-  else if (backup.ageH > 36) issues.push({ level: 'warn', text: `Das letzte Backup ist ${Math.round(backup.ageH)} Stunden alt.` });
-  if (diskFreeGb != null && diskFreeGb < 5) issues.push({ level: 'error', text: `Nur noch ${diskFreeGb} GB Speicherplatz frei.` });
-  if (dbBytes > 1e9) issues.push({ level: 'warn', text: `Die Datenbank ist ${(dbBytes / 1e9).toFixed(1)} GB groß (erwartet: wenige MB).` });
-  if (memMb != null && memMb < 300) issues.push({ level: 'warn', text: `Wenig freier Arbeitsspeicher (${memMb} MB).` });
+  if (lastRun?.status === 'error') issues.push({ level: 'error', text: T('Der letzte Pull ist fehlgeschlagen — Details unter „Daten & Pull".', 'The last pull failed — see "Data & Pull" for details.') });
+  else if (lastRun?.status === 'running' && !pullState.running) issues.push({ level: 'error', text: T('Ein Pull steht auf „läuft", obwohl keiner aktiv ist (Neustart/Absturz).', 'A pull is marked as running although none is active (restart/crash).') });
+  if (pullAgeH == null) issues.push({ level: 'warn', text: T('Noch kein erfolgreicher Pull vorhanden.', 'No successful pull yet.') });
+  else if (pullAgeH > 36) issues.push({ level: 'error', text: T(`Der letzte erfolgreiche Pull ist ${Math.round(pullAgeH)} Stunden her — die Zahlen sind veraltet.`, `The last successful pull was ${Math.round(pullAgeH)} hours ago — the numbers are stale.`) });
+  if (!backup) issues.push({ level: 'warn', text: T('Kein Backup gefunden.', 'No backup found.') });
+  else if (backup.ageH > 36) issues.push({ level: 'warn', text: T(`Das letzte Backup ist ${Math.round(backup.ageH)} Stunden alt.`, `The last backup is ${Math.round(backup.ageH)} hours old.`) });
+  if (diskFreeGb != null && diskFreeGb < 5) issues.push({ level: 'error', text: T(`Nur noch ${diskFreeGb} GB Speicherplatz frei.`, `Only ${diskFreeGb} GB of disk space left.`) });
+  if (dbBytes > 1e9) issues.push({ level: 'warn', text: T(`Die Datenbank ist ${(dbBytes / 1e9).toFixed(1)} GB groß (erwartet: wenige MB).`, `The database is ${(dbBytes / 1e9).toFixed(1)} GB (expected: a few MB).`) });
+  if (memMb != null && memMb < 300) issues.push({ level: 'warn', text: T(`Wenig freier Arbeitsspeicher (${memMb} MB).`, `Low free memory (${memMb} MB).`) });
   return { dbBytes, diskFreeGb, memAvailableMb: memMb, uptimeH: +(process.uptime() / 3600).toFixed(1), lastRun, pullAgeH, backup, pullRunning: pullState.running, issues };
 }
 app.get('/api/health', (req, res) => res.json(healthData()));
@@ -753,22 +757,23 @@ function todayData() {
 app.get('/api/today', (req, res) => res.json(todayData()));
 
 // ---- Digest + Push --------------------------------------------------------
+const eventTypeLabel = t => ({ thumbnail: T('Titelbild', 'cover image'), title: T('Titel', 'title'), description: T('Beschreibung', 'description'), tags: 'Tags', price: T('Preis', 'price'), files: T('Dateien', 'files') }[t] || t);
 function digestText() {
   const d = todayData();
-  const L = [`MakerWorld Analytics — ${d.date.split('-').reverse().join('.')}`];
-  if (d.openPayments.length) L.push(`\nOffene Zahlungen (${d.openPayments.length}): ` + d.openPayments.map(p => `${p.contact_name}: ${p.title}`).join(', '));
+  const L = [`MakerWorld Analytics — ${dateLocal(new Date(d.date))}`];
+  if (d.openPayments.length) L.push(`\n${T('Offene Zahlungen', 'Open payments')} (${d.openPayments.length}): ` + d.openPayments.map(p => `${p.contact_name}: ${p.title}`).join(', '));
   const overdue = d.dueTodos.filter(x => x.overdue);
-  if (overdue.length) L.push(`\nÜberfällige Aufgaben (${overdue.length}): ` + overdue.slice(0, 6).map(t => t.title).join(', '));
-  if (d.alerts.length) L.push(`\nAlerts (${d.alerts.length}): ` + d.alerts.slice(0, 5).map(a => `${a.title}: ${a.text}`).join(' · '));
-  if (d.recentChanges.length) L.push(`\nÄnderungen (3T): ` + d.recentChanges.slice(0, 6).map(c => `${c.model_title || ''} ${c.type}`).join(', '));
-  if (L.length === 1) L.push('\nAlles ruhig — nichts zu tun.');
+  if (overdue.length) L.push(`\n${T('Überfällige Aufgaben', 'Overdue tasks')} (${overdue.length}): ` + overdue.slice(0, 6).map(t => t.title).join(', '));
+  if (d.alerts.length) L.push(`\n${T('Alerts', 'Alerts')} (${d.alerts.length}): ` + d.alerts.slice(0, 5).map(a => `${a.title}: ${a.text}`).join(' · '));
+  if (d.recentChanges.length) L.push(`\n${T('Änderungen (3 T)', 'Changes (3 d)')}: ` + d.recentChanges.slice(0, 6).map(c => `${c.model_title || ''} ${eventTypeLabel(c.type)}`).join(', '));
+  if (L.length === 1) L.push('\n' + T('Alles ruhig — nichts zu tun.', 'All quiet — nothing to do.'));
   return L.join('\n');
 }
 async function sendDigest() {
   const text = digestText();
   setSetting('last_digest', JSON.stringify({ at: nowIso(), text }));
   const url = getSetting('notify_url', '');
-  if (url) { try { await fetch(url, { method: 'POST', headers: { Title: 'MakerWorld Digest', 'Content-Type': 'text/plain; charset=utf-8' }, body: text }); } catch (e) { console.log('[notify] Fehler:', e.message); } }
+  if (url) { try { await fetch(url, { method: 'POST', headers: { Title: T('MakerWorld Digest', 'MakerWorld digest'), 'Content-Type': 'text/plain; charset=utf-8' }, body: text }); } catch (e) { console.log('[notify] Fehler:', e.message); } }
   return text;
 }
 app.get('/api/digest', (req, res) => { let last = null; try { last = JSON.parse(getSetting('last_digest', 'null')); } catch {} res.json({ current: digestText(), last }); });
@@ -783,7 +788,7 @@ async function pushNotify(title, body) {
 
 // ---- Meilenstein-Benachrichtigungen ---------------------------------------
 const DL_THRESHOLDS = [100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000];
-const deNum = n => Number(n).toLocaleString('de-DE');
+const deNum = n => num(n);   // Zahlenformat nach Sprache
 function recordMilestone(design_id, kind, threshold, title) {
   try { return db.prepare('INSERT OR IGNORE INTO milestones(design_id,kind,threshold,title,date,created_at) VALUES(?,?,?,?,?,?)')
     .run(design_id, kind, threshold, title, new Date().toISOString().slice(0, 10), nowIso()).changes > 0; }
@@ -796,24 +801,26 @@ async function checkMilestones() {
     JOIN (${latestSnapSub}) s ON s.design_id=m.design_id WHERE COALESCE(m.planned,0)=0`).all();
   for (const m of models) for (const t of DL_THRESHOLDS)
     if ((m.download || 0) >= t && recordMilestone(m.design_id, 'download', t, `${m.title}: ${t} Downloads`))
-      msgs.push(`${m.title}: ${deNum(t)} Downloads erreicht`);
+      msgs.push(T(`${m.title}: ${deNum(t)} Downloads erreicht`, `${m.title}: ${deNum(t)} downloads reached`));
   // "kalt": live, >30 Tage alt, 0 Downloads in 7 Tagen, vorher aktiv
   const cold = db.prepare(`SELECT m.design_id, m.title,
       (SELECT COALESCE(SUM(download),0) FROM daily_metrics d WHERE d.design_id=m.design_id AND d.date>=date('now','-7 day')) d7,
       (SELECT COALESCE(SUM(download),0) FROM daily_metrics d WHERE d.design_id=m.design_id AND d.date<date('now','-7 day') AND d.date>=date('now','-37 day')) d30
     FROM models m WHERE COALESCE(m.planned,0)=0 AND m.publish_date<=date('now','-30 day')`).all();
   for (const c of cold) if (c.d7 === 0 && c.d30 >= 10 && recordMilestone(c.design_id, 'cold', 0, `${c.title} kalt`))
-    msgs.push(`${c.title}: 0 Downloads in 7 Tagen (vorher ${c.d30} in 30T)`);
+    msgs.push(T(`${c.title}: 0 Downloads in 7 Tagen (vorher ${c.d30} in 30 T)`, `${c.title}: 0 downloads in 7 days (before: ${c.d30} in 30 d)`));
   // Gutschein-Schwellen (524 Punkte = 40 €)
   const acc = db.prepare('SELECT point FROM account_snapshots ORDER BY id DESC LIMIT 1').get();
   if (acc) { const reached = Math.floor((acc.point || 0) / VOUCHER_POINTS);
     for (let k = 1; k <= reached; k++) if (recordMilestone(null, 'voucher', k * VOUCHER_POINTS, `${k * VOUCHER_POINTS} Punkte`))
-      msgs.push(`${deNum(k * VOUCHER_POINTS)} Punkte erreicht — ${k}× ${VOUCHER_EUR} € Gutschein möglich`); }
+      msgs.push(T(`${deNum(k * VOUCHER_POINTS)} Punkte erreicht — ${k}× ${VOUCHER_EUR} € Gutschein möglich`, `${deNum(k * VOUCHER_POINTS)} points reached — ${k}× ${VOUCHER_EUR} € voucher available`)); }
   if (init) { setSetting('milestones_init', '1'); return []; }
-  if (msgs.length) await pushNotify('MakerWorld Meilenstein', msgs.join('\n'));
+  if (msgs.length) await pushNotify(T('MakerWorld Meilenstein', 'MakerWorld milestone'), msgs.join('\n'));
   return msgs;
 }
-app.get('/api/milestones', (req, res) => res.json(db.prepare('SELECT * FROM milestones ORDER BY id DESC LIMIT 40').all()));
+app.get('/api/milestones', (req, res) => res.json(db.prepare('SELECT ms.*, m.title AS model_title FROM milestones ms LEFT JOIN models m ON m.design_id=ms.design_id ORDER BY ms.id DESC LIMIT 40').all()
+  .map(r => ({ ...r, title: r.kind === 'download' ? T(`${r.model_title || ''}: ${r.threshold} Downloads`, `${r.model_title || ''}: ${r.threshold} downloads`)
+    : r.kind === 'voucher' ? T(`${r.threshold} Punkte`, `${r.threshold} points`) : r.kind === 'cold' ? T(`${r.model_title || ''} kalt`, `${r.model_title || ''} gone cold`) : r.title }))));
 app.post('/api/milestones/check', async (req, res) => res.json({ new: await checkMilestones() }));
 
 // ---- Insights (automatische Erkenntnisse) ---------------------------------
@@ -822,30 +829,30 @@ function buildInsights() {
   const models = attachForecast(attachMomentum(modelsWithKpis())).filter(m => !m.planned);
   const ins = [];
   const byDl30 = [...models].sort((a, b) => (b.dl30 || 0) - (a.dl30 || 0));
-  if (byDl30[0] && byDl30[0].dl30 > 0) ins.push({ kind: 'mover', title: 'Zugpferd (30 T)',
-    text: `${byDl30[0].title}: ${deNum(byDl30[0].dl30)} Downloads in 30 Tagen` + (byDl30[0].v_trend != null ? `, Views-Trend ${byDl30[0].v_trend > 0 ? '+' : ''}${byDl30[0].v_trend}%` : ''),
+  if (byDl30[0] && byDl30[0].dl30 > 0) ins.push({ kind: 'mover', title: T('Zugpferd (30 T)', 'Workhorse (30 d)'),
+    text: T(`${byDl30[0].title}: ${deNum(byDl30[0].dl30)} Downloads in 30 Tagen`, `${byDl30[0].title}: ${deNum(byDl30[0].dl30)} downloads in 30 days`) + (byDl30[0].v_trend != null ? T(`, Views-Trend ${byDl30[0].v_trend > 0 ? '+' : ''}${byDl30[0].v_trend}%`, `, views trend ${byDl30[0].v_trend > 0 ? '+' : ''}${byDl30[0].v_trend}%`) : ''),
     design_id: byDl30[0].design_id });
   const fallers = models.filter(m => m.v_trend != null && m.v_trend < -15).sort((a, b) => a.v_trend - b.v_trend);
-  if (fallers[0]) ins.push({ kind: 'faller', title: 'Verliert an Fahrt',
-    text: `${fallers[0].title}: Views ${fallers[0].v_trend}% vs. Vorperiode`, design_id: fallers[0].design_id });
+  if (fallers[0]) ins.push({ kind: 'faller', title: T('Verliert an Fahrt', 'Losing momentum'),
+    text: T(`${fallers[0].title}: Views ${fallers[0].v_trend}% vs. Vorperiode`, `${fallers[0].title}: views ${fallers[0].v_trend}% vs. previous period`), design_id: fallers[0].design_id });
   // hohe Impressions, aber niedrige CTR = Titelbild/Titel-Chance
   const ctrOf = m => m.impression ? (m.view / m.impression) * 100 : null;
   const opp = models.filter(m => (m.impression || 0) > 2000 && ctrOf(m) != null).sort((a, b) => ctrOf(a) - ctrOf(b))[0];
-  if (opp && ctrOf(opp) < 6) ins.push({ kind: 'ctr', title: 'CTR-Chance',
-    text: `${opp.title}: ${deNum(opp.impression)} Impressionen, aber nur ${ctrOf(opp).toFixed(1)}% CTR — Titelbild/Titel testen`, design_id: opp.design_id });
+  if (opp && ctrOf(opp) < 6) ins.push({ kind: 'ctr', title: T('CTR-Chance', 'CTR opportunity'),
+    text: T(`${opp.title}: ${deNum(opp.impression)} Impressionen, aber nur ${ctrOf(opp).toFixed(1)}% CTR — Titelbild/Titel testen`, `${opp.title}: ${deNum(opp.impression)} impressions but only ${ctrOf(opp).toFixed(1)}% CTR — test cover image/title`), design_id: opp.design_id });
   const earner = [...models].sort((a, b) => (b.earned || 0) - (a.earned || 0))[0];
-  if (earner && earner.earned > 0) ins.push({ kind: 'earner', title: 'Top-Verdiener',
-    text: `${earner.title}: ${earner.earned.toFixed(2)} € (gesamt)`, design_id: earner.design_id });
+  if (earner && earner.earned > 0) ins.push({ kind: 'earner', title: T('Top-Verdiener', 'Top earner'),
+    text: T(`${earner.title}: ${earner.earned.toFixed(2)} € (gesamt)`, `${earner.title}: ${earner.earned.toFixed(2)} € (total)`), design_id: earner.design_id });
   // Gutschein-ETA
   const acc = db.prepare('SELECT point FROM account_snapshots ORDER BY id DESC LIMIT 1').get();
   if (acc) { const v = voucherStatus(acc.point, models.reduce((s, m) => s + (m.proj_pts30 || 0), 0) / 30);
-    ins.push({ kind: 'voucher', title: 'Nächster Gutschein',
-      text: `Noch ${deNum(v.remaining)} Punkte bis ${VOUCHER_EUR} €` + (v.etaDays ? ` — bei ~${v.perDay.toFixed(1)} P/Tag (Trend) in ~${v.etaDays} Tagen` : '') });
+    ins.push({ kind: 'voucher', title: T('Nächster Gutschein', 'Next voucher'),
+      text: T(`Noch ${deNum(v.remaining)} Punkte bis ${VOUCHER_EUR} €` + (v.etaDays ? ` — bei ~${v.perDay.toFixed(1)} P/Tag (Trend) in ~${v.etaDays} Tagen` : ''), `${deNum(v.remaining)} points to go until ${VOUCHER_EUR} €` + (v.etaDays ? ` — at ~${v.perDay.toFixed(1)} pts/day (trend) in ~${v.etaDays} days` : '')) });
   }
   // Bester Hashtag (Durchschnitt Views je Modell, mind. 2 Modelle)
   const tags = aggregateGroups(models, 'tag').filter(t => t.key !== '—' && t.count >= 2).map(t => ({ tag: t.key, n: t.count, avg: t.view / t.count })).sort((a, b) => b.avg - a.avg);
-  if (tags.length >= 2) ins.push({ kind: 'tag', title: 'Bester Hashtag',
-    text: `„${tags[0].tag}" bringt im Schnitt ${deNum(Math.round(tags[0].avg))} Views/Modell (${tags[0].n}×)` });
+  if (tags.length >= 2) ins.push({ kind: 'tag', title: T('Bester Hashtag', 'Best hashtag'),
+    text: T(`„${tags[0].tag}" bringt im Schnitt ${deNum(Math.round(tags[0].avg))} Views/Modell (${tags[0].n}×)`, `"${tags[0].tag}" brings ${deNum(Math.round(tags[0].avg))} views per model on average (${tags[0].n}×)`) });
   return ins;
 }
 app.get('/api/insights', (req, res) => res.json({ insights: buildInsights(), date: new Date().toISOString().slice(0, 10) }));
@@ -936,8 +943,8 @@ app.get('/api/analytics/points-matrix', (req, res) => {
 // (Nach außen erreichbar über den isolierten Server public.js; hier lokal fürs Testen.)
 app.get('/p/:token', (req, res) => { const r = renderStatus(req.params.token); res.status(r.code).type('html').send(r.html); });
 app.get('/p/:token/file', (req, res) => {
-  const f = projectFileByToken(req.params.token); if (!f) return res.status(404).send('Keine Datei.');
-  const abs = path.join(DATA_DIR, f.rel); if (!fs.existsSync(abs)) return res.status(404).send('Keine Datei.');
+  const f = projectFileByToken(req.params.token); if (!f) return res.status(404).send(T('Keine Datei.', 'No file.'));
+  const abs = path.join(DATA_DIR, f.rel); if (!fs.existsSync(abs)) return res.status(404).send(T('Keine Datei.', 'No file.'));
   res.setHeader('Content-Disposition', 'attachment; filename="' + f.name.replace(/["\r\n]/g, '') + '"');
   res.setHeader('Content-Type', 'model/3mf'); fs.createReadStream(abs).pipe(res);
 });
@@ -951,7 +958,7 @@ app.use((err, req, res, next) => {
   if (res.headersSent) return next(err);
   const tooBig = err.type === 'entity.too.large', bad = err.type === 'entity.parse.failed';
   if (!tooBig && !bad) console.log('[error]', req.method, req.url, err.message);
-  res.status(tooBig ? 413 : bad ? 400 : 500).json({ error: tooBig ? 'Anfrage zu groß.' : bad ? 'Ungültige Anfrage (JSON).' : 'Interner Fehler.' });
+  res.status(tooBig ? 413 : bad ? 400 : 500).json({ error: tooBig ? T('Anfrage zu groß.', 'Request too large.') : bad ? T('Ungültige Anfrage (JSON).', 'Invalid request (JSON).') : T('Interner Fehler.', 'Internal error.') });
 });
 
 const PORT = process.env.PORT || 4000;

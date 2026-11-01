@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { db, DATA_DIR, IMAGES_DIR, nowIso } from './db.js';
+import { T } from './i18n.js';
 
 const iso = s => String(s || '').replace(/\//g, '-');
 const cell = (row, f) => { const v = row?.[f]; return (v && typeof v === 'object') ? 0 : (v ?? 0); };
@@ -133,16 +134,16 @@ function autoEvent(id, type, note, capturedAt) {
   const day = capturedAt.slice(0, 10);
   if (db.prepare('SELECT 1 FROM events WHERE design_id=? AND type=? AND date=?').get(id, type, day)) return false;
   db.prepare('INSERT INTO events(design_id,date,type,title,note,created_at) VALUES(?,?,?,?,?,?)')
-    .run(id, day, type, 'automatisch erkannt', note, capturedAt);
+    .run(id, day, type, T('automatisch erkannt', 'detected automatically'), note, capturedAt);
   return true;
 }
 function detectChanges(id, old, { title, description, tags, coverHash, updateTime, detailOk }, capturedAt) {
   if (!old) return;                                  // erster Pull: nichts vergleichen
   if (!detailOk) return;                             // Detail-Abruf fehlgeschlagen -> keine Fehl-Events
   let fired = false;
-  if (old.title && title && old.title !== title) fired = autoEvent(id, 'title', `Titel: „${old.title}" → „${title}"`, capturedAt) || fired;
-  if (old.description != null && normText(old.description) && normText(old.description) !== normText(description)) fired = autoEvent(id, 'description', 'Beschreibung geändert', capturedAt) || fired;
-  if (old.cover_hash && coverHash && old.cover_hash !== coverHash) fired = autoEvent(id, 'thumbnail', 'Titelbild geändert', capturedAt) || fired;
+  if (old.title && title && old.title !== title) fired = autoEvent(id, 'title', T(`Titel: „${old.title}" → „${title}"`, `Title: "${old.title}" → "${title}"`), capturedAt) || fired;
+  if (old.description != null && normText(old.description) && normText(old.description) !== normText(description)) fired = autoEvent(id, 'description', T('Beschreibung geändert', 'Description changed'), capturedAt) || fired;
+  if (old.cover_hash && coverHash && old.cover_hash !== coverHash) fired = autoEvent(id, 'thumbnail', T('Titelbild geändert', 'Cover image changed'), capturedAt) || fired;
   const oldTags = (() => { try { return old.tags ? JSON.parse(old.tags) : []; } catch { return []; } })();
   const newTags = Array.isArray(tags) ? tags : [];
   if (old.tags != null && newTags.length) {
@@ -151,7 +152,7 @@ function detectChanges(id, old, { title, description, tags, coverHash, updateTim
     const added = [...nset].filter(t => !oset.has(t)), removed = [...oset].filter(t => !nset.has(t));
     if (added.length || removed.length) {
       const parts = [added.length ? '+ ' + added.join(', ') : '', removed.length ? '– ' + removed.join(', ') : ''].filter(Boolean).join('  ');
-      fired = autoEvent(id, 'tags', 'Tags geändert: ' + parts, capturedAt) || fired;
+      fired = autoEvent(id, 'tags', T('Tags geändert: ', 'Tags changed: ') + parts, capturedAt) || fired;
     }
   }
   // Hinweis: updateTime aendert sich auch bei reinen Auto-Neu-Rendern der 3mf

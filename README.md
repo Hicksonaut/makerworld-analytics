@@ -12,8 +12,12 @@ No cloud, no accounts, no tracking — it runs on your machine (or a Raspberry P
 and the data never leaves it.
 
 > **Bilingual UI (German / English).** The interface ships in German with a
-> one-click **DE / EN** switch in the sidebar (and under *Daten & Pull*). Code and
-> this README are English.
+> one-click **DE / EN** switch in the sidebar (and under *Daten & Pull*). The English
+> version is complete and covered by an automated test: dynamic sentences,
+> server-generated texts (insights, alerts, push messages, status page, invoice) and
+> table/tooltip texts are translated too. The server follows the browser language via
+> the `X-Lang` request header and the saved `lang` setting for background jobs. Code and
+> this README are English. See *Adding a language* below.
 
 ![Overview dashboard](docs/01-overview.png)
 
@@ -197,12 +201,33 @@ one SQLite file under `data/` (git-ignored).
 
 ```
 server/   db.js  index.js  public.js  publicPage.js  scraper.js  ingest.js
-          crm.js  trash.js  seed-demo.js
-web/      index.html  app.js  styles.css  favicon.svg  vendor/chart.umd.min.js
+          crm.js  trash.js  i18n.js  seed-demo.js
+web/      index.html  styles.css  favicon.svg  vendor/chart.umd.min.js
+web/js/   core.js  i18n-en.js  ui.js  a11y.js  analytics.js  todos.js  models.js
+          today.js  crm.js  projects.js  production.js  system.js  boot.js
+          (plain scripts sharing one global scope, loaded in this order)
+tests/    api, operations, ui and i18n tests (node:test + Playwright)
 scripts/  backup.sh  pull-backups-to-mac.sh
 deploy/   makerworld-analytics.service  makerworld-public.service
           makerworld-backup.service  makerworld-backup.timer
 ```
+
+### Tests
+
+```bash
+npm test          # API + operations (backup, trash, watchdog ...) on a throw-away demo DB
+npm run test:ui   # browser tests (Playwright) incl. the complete-English audit
+```
+
+Tests start the app on a free port with a temporary `DATA_DIR`, so your real data is never touched.
+The English audit walks every page, drawer and dialog in EN mode and fails on any leftover German text.
+
+### Adding a language
+
+German strings in the code are the source. `web/js/i18n-en.js` holds a dictionary (`TR`) and regex
+rules for dynamic sentences (`TR_RULES`); `t()` in `core.js` applies them, `server/i18n.js` does the same
+for server texts (`T(de, en)`). For another language add a second dictionary and extend `LANG`/`T`;
+`MWA_I18N_LIST=1 npm run test:ui` lists everything that is still untranslated.
 
 ### Security model (no password, by design)
 

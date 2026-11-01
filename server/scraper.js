@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { db, DATA_DIR, IMAGES_DIR, nowIso, getSetting } from './db.js';
 import { writeModel, writeAccount } from './ingest.js';
+import { T } from './i18n.js';
 
 const PROFILE_DIR = path.join(DATA_DIR, 'browser-profile');
 fs.mkdirSync(PROFILE_DIR, { recursive: true });
@@ -96,7 +97,7 @@ export async function interactiveLogin(onStatus = () => {}) {
   try {
     const page = await ctx.newPage();
     await page.goto('https://makerworld.com/en', { waitUntil: 'domcontentloaded' });
-    onStatus('Browserfenster geoeffnet. Bitte oben rechts auf "Sign In" bei MakerWorld einloggen ...');
+    onStatus(T('Browserfenster geöffnet. Bitte oben rechts auf "Sign In" bei MakerWorld einloggen ...', 'Browser window opened. Please click "Sign In" at the top right of MakerWorld ...'));
     // Der Login passiert clientseitig; die initialen Seitendaten aendern sich
     // dabei nicht. Deshalb regelmaessig neu laden und die Session pruefen.
     for (let i = 0; i < 60; i++) {           // bis zu ~6 Minuten
@@ -108,7 +109,7 @@ export async function interactiveLogin(onStatus = () => {}) {
         try { s = await readSession(page); } catch { continue; }
       }
       if (s && s.handle) {
-        onStatus('Eingeloggt als @' + s.handle + ' — Fenster schliesst gleich.');
+        onStatus(T('Eingeloggt als @', 'Signed in as @') + s.handle + T(' — Fenster schließt gleich.', ' — window closes shortly.'));
         try {   // Session gleich exportieren (fuer Uebertragung auf den Pi)
           const state = await ctx.storageState();
           const mw = (state.cookies || []).filter(c => /makerworld|bambulab/i.test(c.domain));
@@ -117,7 +118,7 @@ export async function interactiveLogin(onStatus = () => {}) {
         await sleep(1500);
         return { loggedIn: true, handle: s.handle };
       }
-      onStatus(`Warte auf Login … (${i + 1})`);
+      onStatus(T(`Warte auf Login … (${i + 1})`, `Waiting for sign-in … (${i + 1})`));
     }
     return { loggedIn: false };
   } finally { await ctx.close(); }
@@ -268,16 +269,16 @@ export async function runPull({ mode = 'manual', onLog = () => {} } = {}) {
     }
     if (!s.handle) {                        // Profil nicht eingeloggt -> Cookies aus session.json injizieren
       if (await injectSessionCookies(ctx)) {
-        onLog('Session aus session.json geladen ...');
+        onLog(T('Session aus session.json geladen ...', 'Session loaded from session.json ...'));
         await page.goto('https://makerworld.com/en', { waitUntil: 'domcontentloaded', timeout: 60000 });
         await sleep(2000); s = await readSession(page);
       }
     }
-    if (!s.handle) throw new Error('Nicht eingeloggt. Bitte zuerst den Login ausfuehren (bzw. Session übertragen).');
-    log(`Konto @${s.handle}, Build ${s.buildId}. Sammle Modell-IDs ...`);
+    if (!s.handle) throw new Error(T('Nicht eingeloggt. Bitte zuerst den Login ausführen (bzw. Session übertragen).', 'Not signed in. Please run the login first (or transfer the session).'));
+    log(T(`Konto @${s.handle}, Build ${s.buildId}. Sammle Modell-IDs ...`, `Account @${s.handle}, build ${s.buildId}. Collecting model IDs ...`));
 
     const ids = await collectIds(page, s.handle);
-    log(`${ids.length} Modelle gefunden.`);
+    log(T(`${ids.length} Modelle gefunden.`, `${ids.length} models found.`));
 
     // Der _next/data-Endpunkt liefert nur JSON, wenn der Sprachpfad zur Session
     // passt. Sprache automatisch erkennen (dein Konto laeuft auf de) und cachen.
@@ -295,26 +296,26 @@ export async function runPull({ mode = 'manual', onLog = () => {} } = {}) {
     };
 
     for (let i = 0; i < ids.length; i++) {
-      if (abortRequested) throw new Error('Pull abgebrochen (Timeout oder manueller Abbruch).');
+      if (abortRequested) throw new Error(T('Pull abgebrochen (Timeout oder manueller Abbruch).', 'Pull aborted (timeout or manual abort).'));
       const id = ids[i];
       try {
         const pp = await analytics(id);
-        if (i === 0 || (LOC && i < 2)) log('Sprachpfad: ' + LOC);
-        if (!pp.modelData) throw new Error('keine modelData (fremdes Modell?)');
-        if (!accountSaved && pp.session?.user) { writeAccount(pp.session.user, capturedAt); accountSaved = true; log(`Konto-Snapshot: ${pp.session.user.point} Punkte, ${pp.session.user.fanCount} Fans`); }
+        if (i === 0 || (LOC && i < 2)) log(T('Sprachpfad: ', 'Language path: ') + LOC);
+        if (!pp.modelData) throw new Error(T('keine modelData (fremdes Modell?)', 'no modelData (someone else\'s model?)'));
+        if (!accountSaved && pp.session?.user) { writeAccount(pp.session.user, capturedAt); accountSaved = true; log(T(`Konto-Snapshot: ${pp.session.user.point} Punkte, ${pp.session.user.fanCount} Fans`, `Account snapshot: ${pp.session.user.point} points, ${pp.session.user.fanCount} followers`)); }
 
         // Detail (Beschreibung, Tags, Bewertungen, Bilder)
         let det = {};
         try { det = await fetchDetail(page, id); }
-        catch (e) { log(`  Detail ${id} uebersprungen: ${e.message}`); }
+        catch (e) { log(T(`  Detail ${id} übersprungen: ${e.message}`, `  Details for ${id} skipped: ${e.message}`)); }
 
         // Zentrale Schreiblogik (inkl. Bilder, Titelbild-Hash, Aenderungserkennung, geplante Merges)
         const r = await writeModel({ id, pp, detail: det, capturedAt });
         ok++;
-        log(`[${i + 1}/${ids.length}] ${r.title} — ${r.days} Tage, ${r.tags} Tags, ${r.images} Bilder` + (r.merged ? ` — geplantes Modell verschmolzen` : ''));
+        log(T(`[${i + 1}/${ids.length}] ${r.title} — ${r.days} Tage, ${r.tags} Tags, ${r.images} Bilder` + (r.merged ? ` — geplantes Modell verschmolzen` : ''), `[${i + 1}/${ids.length}] ${r.title} — ${r.days} days, ${r.tags} tags, ${r.images} images` + (r.merged ? ` — planned model merged` : '')));
       } catch (e) {
         failed++;
-        log(`[${i + 1}/${ids.length}] FEHLER ${id}: ${e.message}`);
+        log(T(`[${i + 1}/${ids.length}] FEHLER ${id}: ${e.message}`, `[${i + 1}/${ids.length}] ERROR ${id}: ${e.message}`));
       }
       db.prepare('UPDATE pull_runs SET models_ok=?, models_failed=? WHERE id=?').run(ok, failed, runId);
       await sleep(1400);
@@ -322,12 +323,12 @@ export async function runPull({ mode = 'manual', onLog = () => {} } = {}) {
 
     db.prepare('UPDATE pull_runs SET status=?, finished_at=?, models_ok=?, models_failed=? WHERE id=?')
       .run('ok', nowIso(), ok, failed, runId);
-    log(`Fertig: ${ok} ok, ${failed} Fehler.`);
+    log(T(`Fertig: ${ok} ok, ${failed} Fehler.`, `Done: ${ok} ok, ${failed} errors.`));
     return { ok, failed, runId };
   } catch (e) {
     db.prepare('UPDATE pull_runs SET status=?, finished_at=?, log=? WHERE id=?')
-      .run('error', nowIso(), [...lines, 'ABBRUCH: ' + e.message].join('\n'), runId);
-    onLog('ABBRUCH: ' + e.message);
+      .run('error', nowIso(), [...lines, T('ABBRUCH: ', 'ABORTED: ') + e.message].join('\n'), runId);
+    onLog(T('ABBRUCH: ', 'ABORTED: ') + e.message);
     throw e;
   } finally {
     activeCtx = null;
