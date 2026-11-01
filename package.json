@@ -10,11 +10,14 @@
     "seed:demo": "node server/seed-demo.js",
     "login": "node server/scraper.js --login",
     "pull": "node server/scraper.js --pull",
-    "test": "node --test tests/api.test.mjs tests/operations.test.mjs",
-    "test:ui": "node --test --test-concurrency=1 tests/ui.test.mjs tests/i18n.test.mjs"
+    "test": "node --test tests/api.test.mjs tests/operations.test.mjs tests/features.test.mjs",
+    "test:ui": "node --test --test-concurrency=1 tests/ui.test.mjs tests/i18n.test.mjs",
+    "docs:screenshots": "node scripts/screenshots.mjs"
   },
   "license": "MIT",
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "better-sqlite3": "^11.8.1",
     "express": "^4.21.2",

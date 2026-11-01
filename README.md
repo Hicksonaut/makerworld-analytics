@@ -53,6 +53,13 @@ and the data never leaves it.
 - **Change timeline & CTR impact:** edits to cover image, title, tags or
   description are detected automatically on each pull, and the app measures CTR
   and impressions before/after the change (±21 days).
+- **Experiments (hypothesis → verdict):** attach a hypothesis ("new cover raises
+  the CTR") and an evaluation window (7–28 days) to any change. When the window
+  has passed, the app tests CTR before vs. after (two-proportion z-test, one-sided
+  95 %) and rules *helped / neutral / hurt* — or *too little data* below 300
+  impressions per side. Overlapping changes are flagged as a confounder. Verdicts
+  show up as badges, in the insights/push, and as a per-lever scoreboard under
+  *Analysis* ("cover changes helped 3 of 5 times").
 - Momentum, model comparison (aligned by date **or** by age since release),
   category breakdown, points economy, and a trend-based forecast.
 
@@ -65,6 +72,14 @@ and the data never leaves it.
   each with their own quantity — for when one print bed only fits part of an
   order (e.g. 2× one profile + 1× another). Filament and print time are summed
   automatically, and can be pulled straight from the linked model's profile.
+- **Invoice archive & dunning:** every issued invoice is stored as an immutable
+  snapshot (consecutive numbers, payment terms configurable), re-opened unchanged,
+  and overdue ones get a payment reminder → reminder → final notice (no fees) and
+  show up on *Today* and in the daily digest.
+- **Tax export:** cash-basis profit statement per year (paid projects on their
+  payment date + MakerWorld payouts − recorded expenses) as an Excel-friendly CSV
+  with the invoice number on every booking. Same sources as the profit/loss page,
+  verified by a test. Not tax advice.
 - Parts catalog (magnets, screws, inserts …) with unit prices that flow into
   the calculation.
 - **"Did this project pay off?"** — because a model you made privately for a
@@ -124,6 +139,10 @@ and the data never leaves it.
 | Own projects (planning) | Categories | Mobile |
 |---|---|---|
 | ![](docs/06-own-projects.png) | ![](docs/05-categories.png) | ![](docs/07-mobile.png) |
+
+| Experiments & change impact |
+|---|
+| ![](docs/08-experiments.png) |
 
 ---
 
@@ -200,14 +219,17 @@ Vanilla-JS single-page frontend with Chart.js — **no build step**. Data lives 
 one SQLite file under `data/` (git-ignored).
 
 ```
-server/   db.js  index.js  public.js  publicPage.js  scraper.js  ingest.js
-          crm.js  trash.js  i18n.js  seed-demo.js
+server/   index.js (setup, host protection, mounting)  db.js  i18n.js  trash.js
+          routes-models.js  routes-analytics.js  kpi.js  insights.js  health.js
+          ops.js (pull, login, settings, cron)  experiments.js  invoices.js
+          crm.js  ingest.js  scraper.js  public.js  publicPage.js  seed-demo.js
 web/      index.html  styles.css  favicon.svg  vendor/chart.umd.min.js
 web/js/   core.js  i18n-en.js  ui.js  a11y.js  analytics.js  todos.js  models.js
           today.js  crm.js  projects.js  production.js  system.js  boot.js
           (plain scripts sharing one global scope, loaded in this order)
 tests/    api, operations, ui and i18n tests (node:test + Playwright)
-scripts/  backup.sh  pull-backups-to-mac.sh
+scripts/  backup.sh  pull-backups-to-mac.sh  screenshots.mjs
+.github/  workflows/test.yml (CI: npm test + browser tests)
 deploy/   makerworld-analytics.service  makerworld-public.service
           makerworld-backup.service  makerworld-backup.timer
 ```
@@ -218,6 +240,8 @@ deploy/   makerworld-analytics.service  makerworld-public.service
 npm test          # API + operations (backup, trash, watchdog ...) on a throw-away demo DB
 npm run test:ui   # browser tests (Playwright) incl. the complete-English audit
 ```
+
+`npm run docs:screenshots` regenerates the README images from the demo data (English by default, `node scripts/screenshots.mjs de` for German).
 
 Tests start the app on a free port with a temporary `DATA_DIR`, so your real data is never touched.
 The English audit walks every page, drawer and dialog in EN mode and fails on any leftover German text.

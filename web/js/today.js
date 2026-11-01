@@ -31,6 +31,14 @@ async function renderHeute() {
     w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Meilensteine'), bd));
   }
 
+  if (d.overdueInvoices && d.overdueInvoices.length) {
+    const bd = el('div', { class: 'bd' });
+    d.overdueInvoices.forEach(i => bd.append(el('div', { class: 'checkline', style: 'cursor:pointer', onclick: () => openProject(i.project_id) },
+      el('span', { class: 'tag', style: 'background:var(--neg)' }, i.overdue_days + ' ' + t('T') + ' ' + t('überfällig')),
+      el('span', { style: 'flex:1' }, el('b', {}, i.customer), el('span', { class: 'muted' }, ' · RE-' + i.no + (i.reminder_level ? ' · ' + t('Mahnstufe') + ' ' + i.reminder_level : ''))),
+      el('span', { class: 'num' }, eur(i.total)))));
+    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Überfällige Rechnungen', el('a', { onclick: () => go('revenue'), style: 'font-weight:400;text-transform:none;font-size:11px' }, 'Mahnwesen →')), bd));
+  }
   if (d.openPayments.length) {
     const bd = el('div', { class: 'bd' });
     d.openPayments.forEach(p => bd.append(el('div', { class: 'checkline', style: 'cursor:pointer', onclick: () => openProject(p.id) },

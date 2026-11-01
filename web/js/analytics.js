@@ -199,7 +199,7 @@ async function drawCompare() {
   if (grouped) {
     const by = cmpView === 'category' ? 'category' : cmpView === 'tag' ? 'tag' : 'group';
     const { rows } = await api('/analytics/groups?by=' + by);
-    tbl.append(el('div', { class: 'hd' }, 'Kennzahlen je ' + (by === 'tag' ? 'Tag' : by === 'group' ? 'eigener Kategorie' : 'MakerWorld-Kategorie') + ' — Spaltenkopf sortiert'));
+    tbl.append(el('div', { class: 'hd' }, 'Kennzahlen je ' + (by === 'tag' ? 'Tag' : by === 'group' ? 'eigener Gruppe' : 'MakerWorld-Kategorie') + ' — Spaltenkopf sortiert'));
     const cols = [['key','Gruppe'],['count','#'],['view','Views'],['impression','Impressionen'],['ctr','CTR%'],['download','Downloads'],['dl30','Downloads 30 T'],['collect','Gesammelt'],['like','Likes'],['point','Punkte']];
     tbl.append(groupTable(rows, cols, r => openGroup(by, r.key)));
     return;
@@ -361,7 +361,7 @@ async function renderPoints() {
 // ============ BERICHT (Wochenrückblick) ============
 async function renderReport() {
   if (!STATE.overview) await loadOverview();
-  const o = STATE.overview, models = o.models, t = o.totals;
+  const o = STATE.overview, models = o.models, tot = o.totals;
   const w = pagehead('Wochenbericht', 'Wochenrückblick — Bewegung der letzten 7 Tage, Prognose und offene Punkte.');
   w.append(el('div', { class: 'toolbar' }, el('button', { class: 'btn sm', onclick: () => window.print() }, 'Drucken / PDF')));
 
@@ -370,9 +370,9 @@ async function renderReport() {
   w.append(el('div', { class: 'stats' },
     el('div', { class: 'stat' }, el('div', { class: 'v' }, fmt(dl7)), el('div', { class: 'l' }, 'Downloads · 7 T')),
     el('div', { class: 'stat' }, el('div', { class: 'v' }, fmt(v7)), el('div', { class: 'l' }, 'Views · 7 T')),
-    el('div', { class: 'stat' }, el('div', { class: 'v pos' }, eur(t.earned30)), el('div', { class: 'l' }, 'Verdient · 30 T')),
+    el('div', { class: 'stat' }, el('div', { class: 'v pos' }, eur(tot.earned30)), el('div', { class: 'l' }, 'Verdient · 30 T')),
     el('div', { class: 'stat' }, el('div', { class: 'v' }, fmt(o.openTodos)), el('div', { class: 'l' }, 'offene Todos')),
-    el('div', { class: 'stat' }, el('div', { class: 'v' }, t.voucher_eta_days != null ? '~' + t.voucher_eta_days + ' T' : '–'), el('div', { class: 'l' }, 'nächster 40€-Gutschein'), el('div', { class: 'd muted' }, 'noch ' + fmt(t.voucher_remaining) + ' Punkte'))));
+    el('div', { class: 'stat' }, el('div', { class: 'v' }, tot.voucher_eta_days != null ? '~' + tot.voucher_eta_days + ' T' : '–'), el('div', { class: 'l' }, 'nächster 40€-Gutschein'), el('div', { class: 'd muted' }, 'noch ' + fmt(tot.voucher_remaining) + ' Punkte'))));
 
   const miniTable = (title, rows, valFn, cls) => {
     const c = el('div', { class: 'card' }, el('div', { class: 'hd' }, title));
@@ -407,13 +407,27 @@ async function renderReport() {
       el('div', { class: 'bd muted', style: 'padding-bottom:0' }, 'Über alle Modelle: durchschnittliche CTR-Veränderung vor/nach einer Änderung + Anteil der Änderungen, die die CTR verbessert haben („Trefferquote"). Zeigt, welcher Hebel wirklich zieht.'), wrap));
   }
 
+  // Experimente: Lernbilanz je Hebel + Liste der letzten Tests mit Urteil
+  const ex = await api('/experiments').catch(() => ({ items: [], summary: [] }));
+  if (ex.items && ex.items.length) {
+    const sum = el('div', { class: 'stats', style: 'border:0;margin:0 0 8px' }, ex.summary.map(s => el('div', { class: 'stat' },
+      el('div', { class: 'v' }, `${s.helped}/${s.helped + s.neutral + s.hurt}`), el('div', { class: 'l' }, s.label),
+      el('div', { class: 'd muted' }, `${s.neutral} ${t('neutral')} · ${s.hurt} ${t('schadet')}` + (s.running ? ` · ${s.running} ${t('läuft')}` : '')))));
+    const tb = el('table', {}, el('thead', {}, el('tr', {}, ['Datum', 'Modell', 'Änderung', 'Hypothese', 'Urteil'].map(h => el('th', {}, h)))),
+      el('tbody', {}, ex.items.slice(0, 15).map(x => el('tr', {}, el('td', {}, dmy(x.date)), el('td', { class: 'title' }, x.model_title), el('td', {}, x.label || x.title || x.type),
+        el('td', { class: 'muted' }, x.hypothesis || '–'), el('td', {}, verdictBadge(x))))));
+    w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Experimente (Hypothese → Urteil)'),
+      el('div', { class: 'bd muted', style: 'padding-bottom:0' }, 'Jede Änderung wird nach Ablauf der Frist per Vorher/Nachher-Test auf die CTR geprüft (einseitig 95 %). Die Zahl vorn zeigt: so oft hat dieser Hebel geholfen / insgesamt ausgewertet.'),
+      el('div', { class: 'bd' }, sum, el('div', { class: 'tablewrap' }, tb))));
+  }
+
   // Letzte Änderungen
   const evs = await api('/events');
   const byId = Object.fromEntries(models.map(m => [m.design_id, m.title]));
   const recent = evs.slice(0, 12);
   const list = el('ul', { class: 'timeline' });
   if (!recent.length) list.append(el('li', { class: 'muted' }, 'keine Einträge'));
-  recent.forEach(ev => list.append(el('li', {}, el('span', { class: 'date' }, dmy(ev.date)), el('span', { class: 'pill' }, ev.type || 'other'),
+  recent.forEach(ev => list.append(el('li', {}, el('span', { class: 'date' }, dmy(ev.date)), el('span', { class: 'pill' }, EVT_LABEL[ev.type] || ev.type || 'Sonstiges'),
     el('div', { style: 'flex:1' }, el('b', {}, ev.title || ''), el('div', { class: 'muted' }, (ev.design_id ? (byId[ev.design_id] || ev.design_id) : 'Global') + (ev.note ? ' — ' + ev.note : ''))))));
   w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Letzte Änderungen'), el('div', { class: 'bd' }, list)));
 }

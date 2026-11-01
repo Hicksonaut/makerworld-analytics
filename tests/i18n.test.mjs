@@ -15,11 +15,11 @@ const DE_WORDS = ['der', 'die', 'das', 'und', 'oder', 'nicht', 'kein', 'keine', 
   'bitte', 'aufgabe', 'aufgaben', 'kunde', 'kunden', 'projekt', 'projekte', 'modell', 'modelle', 'tage', 'tagen', 'woche', 'monat', 'datum', 'preis', 'bezahlt', 'offen', 'löschen',
   'speichern', 'gespeichert', 'gelöscht', 'hinzufügen', 'eintrag', 'notiz', 'notizen', 'fehler', 'beim', 'nach', 'aus', 'auf', 'bei', 'im', 'ein', 'eine', 'einen', 'sind', 'oben', 'unten',
   'jetzt', 'erst', 'zurück', 'öffnen', 'schließen', 'abbrechen', 'laden', 'läuft', 'fertig', 'gesamt', 'summe', 'anzahl', 'wenn', 'dann', 'damit', 'wie', 'was', 'wer', 'wo', 'gibt', 'als', 'auch', 'nur', 'mehr', 'zeigt', 'wähle', 'wählen',
-  'seit', 'dein', 'deine', 'ihr', 'ihre', 'ihrer', 'über', 'gegenüber', 'vorwoche', 'letzte', 'letzten', 'erledigt', 'angelegt', 'verknüpft', 'hochgeladen', 'veröffentlicht', 'stufe', 'phase', 'kosten', 'gewinn', 'verlust', 'rechnung', 'beleg'];
-const DE_RE = new RegExp(`[äöüÄÖÜß]|(?:^|[^\\p{L}])(?:${DE_WORDS.join('|')})(?![\\p{L}])`, 'iu');
+  'seit', 'dein', 'deine', 'ihr', 'ihre', 'ihrer', 'über', 'gegenüber', 'vorwoche', 'letzte', 'letzten', 'erledigt', 'angelegt', 'verknüpft', 'hochgeladen', 'veröffentlicht', 'stufe', 'phase', 'kosten', 'gewinn', 'verlust', 'rechnung', 'beleg', 'kontostand', 'konto', 'spalten', 'klick', 'verlauf', 'klickrate', 'punkte', 'periode', 'eigene', 'eigener', 'kategorie', 'ansicht', 'metrik', 'leeren', 'gruppieren', 'kumuliert', 'korrelation', 'drucken', 'nichts', 'trefferquote', 'titelbild', 'kontakte', 'kontakt', 'kostenlos', 'marge', 'stk', 'reicht', 'hoch', 'deutsch', 'hinweis', 'hinweise', 'keins', 'gefunden', 'anlegen', 'planen', 'empfehlen', 'suchen', 'durchsuchen', 'direkte', 'druckprofil', 'druckzeit', 'projekttitel', 'vorher', 'nachher', 'druck', 'eigenprojekt', 'folgt', 'pkt', 'anz', 'bierdeckel', 'hebel', 'änderung', 'änderungen', 'erkannt', 'automatisch', 'gramm', 'spule', 'aufgabe', 'kunde', 'verdient', 'offene', 'offenen', 'gesamt', 'empfehlungen', 'wert', 'anzeigen', 'ausblenden', 'einblenden', 'ziel', 'ziele', 'stunden', 'einzel', 'menge', 'betrag', 'kontakten', 'abgeschlossen', 'planung', 'entwurf', 'bearbeitet', 'zuletzt', 'bewertung', 'bewertungen', 'beschreibung', 'titel', 'bild', 'bilder', 'fehlt', 'unbekannt', 'wochen', 'monatlich', 'täglich', 'wöchentlich', 'einnahmen', 'ausgaben', 'gewinn', 'umsatz', 'zahlung', 'zahlungen', 'forderungen', 'mahnung', 'urteil', 'hypothese'];
+const DE_RE = new RegExp(`[äöüÄÖÜß]|\\bz\\. ?B\\.|(?:^|[^\\p{L}])(?:${DE_WORDS.join('|')})(?![\\p{L}])`, 'iu');
 export const looksGerman = s => DE_RE.test(s);
 // Bekannte Ausnahmen: Eigennamen/Fachbegriffe, die in beiden Sprachen gleich sind
-const SAME = new Set(['Phase', 'MakerWorld', 'Views', 'Likes', 'Boost', 'Follower', 'Tags', 'Status', 'Release', 'Momentum', 'Leads', 'CSV', 'CTR%', 'Trend', 'Board', 'Filament', 'AMS', 'PLA', 'PETG', 'ABS', 'ASA', 'TPU', 'Standard']);
+const SAME = new Set(['Deutsch', 'Filter', 'Phase', 'MakerWorld', 'Views', 'Likes', 'Boost', 'Follower', 'Tags', 'Status', 'Release', 'Momentum', 'Leads', 'CSV', 'CTR%', 'Trend', 'Board', 'Filament', 'AMS', 'PLA', 'PETG', 'ABS', 'ASA', 'TPU', 'Standard']);
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const list = process.env.MWA_I18N_LIST === '1';
@@ -106,6 +106,16 @@ describe('Englische Oberflaeche: Laufzeit', () => {
     const popupP = ctx.waitForEvent('page', { timeout: 6000 }).catch(() => null);
     await page.evaluate(i => openInvoice(i), pPrint); const popup = await popupP;
     if (popup) { await popup.waitForLoadState('load'); await sleep(300); seenText.push(['rechnung', await popup.evaluate(() => document.body.innerText)]); await popup.close(); }
+    // 4b) Rechnungsarchiv, Mahnung, Steuer-Export, Experimente
+    { const d = app.db(); d.prepare("UPDATE invoices SET due_date='2020-01-01', date='2019-12-18' WHERE project_id=?").run(pPrint); d.close(); }
+    const popupR = ctx.waitForEvent('page', { timeout: 6000 }).catch(() => null);
+    await page.evaluate(i => openReminder(i), pPrint); const popupR2 = await popupR;
+    if (popupR2) { await popupR2.waitForLoadState('load'); await sleep(300); seenText.push(['mahnung', await popupR2.evaluate(() => document.body.innerText)]); await popupR2.close(); }
+    const dAgo = n => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+    await api('POST', '/events', { design_id: modelId, date: dAgo(45), type: 'title', title: 'EN Title test', hypothesis: 'EN hypothesis', eval_days: 14 });
+    await api('POST', '/events', { design_id: modelId, date: dAgo(2), type: 'thumbnail', title: 'EN Cover test', hypothesis: 'EN running', eval_days: 14 });
+    for (const r of ['revenue', 'heute', 'report']) { await go(r, 1200); await scanText(r + '-neu'); }
+    await page.evaluate(i => openModel(i), modelId); await sleep(1500); await scanText('modell-drawer-experimente'); await closeD();
     const status = await ctx.newPage(); await status.goto(`${app.base}/p/${token}`); await sleep(300); seenText.push(['statusseite(en)', await status.evaluate(() => document.body.innerText)]); await status.close();
     await api('POST', '/settings', { lang: 'en' }); const st2 = await ctx.newPage(); await st2.goto(`${app.base}/p/${token}`); await sleep(300); seenText.push(['statusseite(setting=en)', await st2.evaluate(() => document.body.innerText)]); await st2.close();
     // 5) Toast-Texte und Fehler (Server-Texte kommen schon uebersetzt)

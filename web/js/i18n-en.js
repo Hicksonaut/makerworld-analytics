@@ -361,7 +361,7 @@ TR_RULES.push(
   [/^(.+) · (\d+) ok \/ (\d+) Fehler$/, '$1 · $2 ok / $3 errors'],
   [/^Modell (.+) · Profil (.+)$/, 'Model $1 · profile $2'],
   [/^(\d+) Modelle · Datenstand (.+)$/, '$1 models · data as of $2'],
-  [/^(.+) · (\d+) Modelle$/, '$1 · $2 models'],
+  [/^(.+) · (\d+) Modelle$/, (m, a, n) => t(a) + ' · ' + n + ' models'],
   [/^▼ (.+) %  \(Eindrücke → Aufrufe\)$/, '▼ $1 %  (impressions → views)'],
   [/^▼ (.+) %  \(Aufrufe → (.+)\)$/, (m, p, x) => `▼ ${p} %  (views → ${t(x)})`],
   [/^(\d+) offene Leads$/, '$1 open leads'],
@@ -391,3 +391,64 @@ Object.assign(TR, {
   'Schließen': 'Close', 'Menü öffnen': 'Open menu', 'Suche in Modellen, Kunden und Projekten': 'Search models, customers and projects', 'Zum Inhalt springen': 'Skip to content'
 });
 Object.assign(TR, { 'keine Datei': 'no file', 'Öffne Fenster …': 'Opening window …', 'starte …': 'starting …', 'lädt …': 'loading …', 'Modell': 'Model' });
+
+// ---- Experimente, Rechnungsarchiv, Mahnwesen, Steuer-Export ----
+TR_RULES.unshift(
+  [/^läuft noch (\d+) Tage$/, 'running · $1 days left'],
+  [/^überfällig (\d+) d$/, 'overdue $1 d'],
+  [/^Zahlungsziel (\d+) Tage$/, 'payment terms $1 days'],
+  [/^Zu unserer Rechnung Nr\. (\S+) vom (.+) über (.+) \(fällig am (.+)\) konnten wir bisher keinen Zahlungseingang feststellen\.$/,
+    'We have not yet received payment for our invoice No. $1 dated $2 for $3 (due $4).'],
+  [/^Wir bitten Sie, den offenen Betrag bis spätestens (.+) zu überweisen\.$/, 'Please transfer the outstanding amount by $1 at the latest.']
+);
+Object.assign(TR, {
+  'Ausgaben nach Art': 'Expenses by type', 'Einnahmen nach Art': 'Income by type', 'Auswertung nach …': 'Evaluate after …', 'Fällig / bezahlt': 'Due / paid',
+  'Gewinn / Verlust': 'Profit / loss', 'Hypothese': 'Hypothesis', 'Hypothese ergänzen': 'Add hypothesis', 'Hypothese ändern': 'Edit hypothesis',
+  'Hypothese (optional), z. B. „Neues Cover steigert die CTR“': 'Hypothesis (optional), e.g. "New cover raises the CTR"',
+  'z. B. Neues Cover steigert die CTR': 'e.g. New cover raises the CTR',
+  'Was soll die Änderung bewirken? Nach der Frist wird sie automatisch gegen die CTR geprüft.': 'What should the change achieve? After the deadline it is checked against the CTR automatically.',
+  'weitere Änderung im Zeitraum': 'another change in the period', 'zu wenig Daten': 'too little data', 'hat geholfen': 'helped', 'schadet': 'hurts', 'neutral': 'neutral', 'läuft': 'running',
+  'Experimente (Hypothese → Urteil)': 'Experiments (hypothesis → verdict)', 'Urteil': 'Verdict',
+  'Jede Änderung wird nach Ablauf der Frist per Vorher/Nachher-Test auf die CTR geprüft (einseitig 95 %). Die Zahl vorn zeigt: so oft hat dieser Hebel geholfen / insgesamt ausgewertet.':
+    'After the deadline every change is checked against the CTR with a before/after test (one-sided 95 %). The leading number shows how often this lever helped / how many were evaluated in total.',
+  'Rechnungen': 'Invoices', 'Zahlungsziel': 'Payment terms', 'Zahlungsziel (Tage)': 'Payment terms (days)', 'Tage': 'days', 'T': 'd', 'An': 'To', 'Offener Betrag': 'Outstanding amount',
+  'Mahnstufe': 'Reminder level', 'Mahnung': 'Overdue notice', 'Nächste Mahnung': 'Next notice', 'Letzte Mahnung': 'Final notice', 'Zahlungserinnerung': 'Payment reminder',
+  'Überfällige Rechnungen': 'Overdue invoices', 'Mahnwesen →': 'Dunning →', 'Neu erzeugen': 'Regenerate', 'Rechnung neu erzeugen?': 'Regenerate invoice?',
+  'Mit aktuellen Daten neu erzeugen (gleiche Nummer)': 'Regenerate with current data (same number)',
+  'Die gespeicherte Rechnung wird mit den aktuellen Projektdaten überschrieben (Nummer bleibt).': 'The stored invoice is overwritten with the current project data (number stays).',
+  'Jede ausgestellte Rechnung wird unverändert archiviert; Klick öffnet sie. Überfällige Rechnungen bekommen eine Zahlungserinnerung, dann Mahnung, dann letzte Mahnung (ohne Gebühren).':
+    'Every issued invoice is archived unchanged; click to open it. Overdue invoices get a payment reminder, then an overdue notice, then a final notice (no fees).',
+  'Möglicherweise hat sich Ihre Zahlung mit diesem Schreiben überschnitten — dann betrachten Sie es bitte als gegenstandslos.': 'Your payment may have crossed with this letter — if so, please disregard it.',
+  'Andernfalls behalten wir uns weitere Schritte vor.': 'Otherwise we reserve the right to take further steps.',
+  'Steuer-Export (Einnahmenüberschussrechnung)': 'Tax export (cash-basis profit statement)', 'CSV herunterladen': 'Download CSV', 'Offene Forderungen': 'Open receivables',
+  'zählt erst bei Zahlung': 'counts only once paid', 'Keine Einnahmen.': 'No income.', 'Keine Ausgaben.': 'No expenses.',
+  'Zuflussprinzip: Projekte zählen am Zahlungsdatum, dazu MakerWorld-Auszahlungen und die erfassten Ausgaben. Die CSV (Semikolon, Excel-tauglich) enthält jede Buchung mit Rechnungsnummer. Keine Steuerberatung — bitte mit dem Steuerberater abgleichen.':
+    'Cash basis: projects count on their payment date, plus MakerWorld payouts and the recorded expenses. The CSV (semicolon, Excel-friendly) lists every booking with its invoice number. Not tax advice — please check with your tax advisor.'
+});
+
+// ---- Nachtrag: bisher unuebersetzte Beschriftungen (Tabellen, Platzhalter, Einheiten) ----
+TR_RULES.unshift(
+  [/^läuft noch 1 Tage$/, 'running · 1 day left'],
+  [/^(\d+) Kontakte$/, '$1 contacts'], [/^(\d+) Proj\.$/, '$1 proj.'], [/^(\d+) Hinweis\(e\)$/, '$1 notice(s)'], [/^(\d+) kostenlos$/, '$1 free'],
+  [/^folgt (\d+)$/, 'following $1'], [/^Korrelation (.+)$/, 'Correlation $1'], [/^zuletzt bearbeitet (.+)$/, 'last edited $1'],
+  [/^Kennzahlen je (.+) — Spaltenkopf sortiert$/, (m, a) => 'Key figures per ' + t(a) + ' — click a column header to sort']
+);
+Object.assign(TR, {
+  'Views-Verlauf 30 T': 'Views trend 30 d', 'Klick = Details': 'Click = details', 'z. B. Bierdeckel live': 'e.g. Coasters live', 'Punkte 30 T': 'Points 30 d', 'pro Periode': 'per period',
+  'eigene Kategorie': 'own category', 'eigener Gruppe': 'custom group', 'Punkte kumuliert': 'Points cumulative', 'Drucken / PDF': 'Print / PDF',
+  'Klickrate (CTR): Views ÷ Impressionen': 'Click-through rate (CTR): views ÷ impressions', 'Pkt =': 'pts =', 'Punkte =': 'points =',
+  'Beschreibung entwerfen …': 'Draft description …', 'Beschreibung (Entwurf)': 'Description (draft)', '★ (Anz.)': '★ (count)', 'CTR vorher': 'CTR before', 'Direkte URL': 'Direct URL',
+  '(ohne Titel)': '(untitled)', 'g/Druck': 'g/print', 'Zeit/Druck': 'time/print', '× Druck': '× print', '% Marge': '% margin',
+  'Teil (z.B. Neodym-Magnet 8×3)': 'Part (e.g. neodymium magnet 8×3)', 'z.B. Untersetzer': 'e.g. coasters', 'z.B. https://ntfy.sh/mein-geheimes-thema': 'e.g. https://ntfy.sh/my-secret-topic',
+  'z.B. https://raspberrypi.your-tailnet.ts.net:8443': 'e.g. https://raspberrypi.your-tailnet.ts.net:8443',
+  'Eigenprojekt': 'own project', 'eigener Druck': 'own print', 'Anlegen': 'Create', 'Ansicht': 'View', 'Druckprofil': 'Print profile', 'Druckzeit': 'Print time', 'Durchsuchen': 'Browse',
+  'Empfehlen': 'Suggest', 'Gruppieren': 'Group by', 'Konto': 'Account', 'Kontostand': 'Balance', 'Leeren': 'Clear', 'Metrik': 'Metric', 'Planen': 'Plan', 'Projekttitel': 'Project title',
+  'Spalten': 'Columns', 'Stk': 'pcs', 'Suchen': 'Search', 'Titel': 'Title', 'Titelbild': 'Cover image', 'Trefferquote': 'Hit rate', 'hoch': 'high', 'keins gefunden': 'none found',
+  'nichts': 'nothing', 'reicht': 'lasts', 'kostenlos': 'free', 'MakerWorld-Kategorie': 'MakerWorld category', 'Proj.': 'Projects', 'Downloads v→n': 'Downloads b→a',
+  'schadet': 'hurt', 'Portfolio': 'Portfolio', 'MakerWorld-Level': 'MakerWorld level', 'Beschreibung': 'Description'
+});
+Object.assign(TR, { ' · Eigenprojekt': ' · own project', ' · eigener Druck': ' · own print', 'Eigene Kategorie': 'Own category' });
+TR_RULES.unshift([/^(.+) Views\/30 T$/, '$1 views/30 d']);
+Object.assign(TR, { 'Views 7 T': 'Views 7 d', 'Views 30 T': 'Views 30 d', 'Downloads 7 T': 'Downloads 7 d', 'Downloads 30 T': 'Downloads 30 d', '— Profil / Standard —': '— Profile / default —' });
+TR_RULES.push([/^(.*?)(\+?\d+) T$/, (m, a, n) => t(a) + n + ' d']);
+Object.assign(TR, { 'ja': 'yes', 'nein': 'no', 'Preis': 'Price', 'Dateien': 'Files', 'Sonstiges': 'Other', 'Tags': 'Tags' });

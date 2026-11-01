@@ -1,23 +1,8 @@
 // CRM: Rechnung, Konstanten, Kunden, Leads, Finanzen.
 // (Teil der MakerWorld-Analytics-Oberflaeche; klassische Skripte teilen sich den globalen Namensraum, Ladereihenfolge siehe index.html.)
 // ---- Rechnung / Beleg (druckbar) ----
-async function openInvoice(pid) {
-  const s = await api('/crm/settings'); const seller = s.seller || {};
-  if (!seller.name) { if (await askConfirm('Kein Rechnungs-Absender hinterlegt', 'Der Absender gehört auf die Rechnung. Jetzt unter Finanzen eintragen?', 'Zu Finanzen')) { closeDrawer(); go('revenue'); } return; }
-  const p = await api('/project/' + pid);
-  const c = p.contact_id ? await api('/contact/' + p.contact_id).then(x => x.contact) : {};
-  const inv = await jpost('/crm/projects/' + pid + '/invoice-number', {});   // je Projekt stabil, verbraucht beim erneuten Öffnen keine Nummer
-  const num = inv.number;
-  const qty = p.qty || 1; const total = p.calc?.price || 0; const unit = qty ? total / qty : total;
-  const esc = x => String(x || '').replace(/[<>&"']/g, m => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' }[m]));
-  const dt = dmy(inv.date || today());
-  const custName = c.name || p.contact_name || '';
-  // Druckpositionen (falls vorhanden) als Detailzeilen unter der Hauptposition.
-  const posLines = (p.items || []).map(it => `<div class=detail>• ${esc(it.label || it.model_title || t('Position'))} — ${it.qty}×</div>`).join('');
-  const fnameSafe = s2 => String(s2 || '').replace(/[^\w äöüÄÖÜß.-]/g, '').trim().replace(/\s+/g, '_');
-  const title = `${t('Rechnung')}_${num}_${fnameSafe(custName) || t('Kunde')}`;
-  const html = `<!doctype html><html lang=${LANG.cur}><head><meta charset=utf-8><title>${esc(title)}</title>
-  <style>body{font:13px/1.5 -apple-system,system-ui,sans-serif;color:#1a1c1f;max-width:720px;margin:0 auto;padding:40px 24px}
+// Gemeinsame Druckvorlage fuer Rechnung und Mahnung (eigener Tab, "Als PDF speichern" ueber den Druckdialog).
+const DOC_CSS = `body{font:13px/1.5 -apple-system,system-ui,sans-serif;color:#1a1c1f;max-width:720px;margin:0 auto;padding:40px 24px}
   h1{font-size:22px;margin:0 0 2px}.muted{color:#666}.row{display:flex;justify-content:space-between;margin-top:24px}
   table{width:100%;border-collapse:collapse;margin-top:24px}th,td{text-align:left;padding:8px;border-bottom:1px solid #ddd;vertical-align:top}
   td.n,th.n{text-align:right}.tot{font-weight:700;font-size:16px}.foot{margin-top:30px;color:#666;font-size:12px}
@@ -25,20 +10,69 @@ async function openInvoice(pid) {
   .bar{position:sticky;top:0;display:flex;gap:8px;align-items:center;background:#f4f5f6;border:1px solid #dcdfe3;border-radius:8px;padding:10px 12px;margin-bottom:20px;font-size:12px}
   .bar b{font-size:13px}.bar button{font:inherit;padding:6px 12px;border:1px solid #c3c7cc;background:#fff;border-radius:6px;cursor:pointer}
   .bar .pri{background:#1f5c8f;color:#fff;border-color:#1f5c8f;font-weight:600}
-  @media print{body{margin:0;padding:0}.bar{display:none}}</style></head><body>
-  <div class=bar><b>${t('Rechnung')} ${num}</b><span class=muted style="flex:1">${t('→ „Als PDF speichern" und dann selbst per WhatsApp / Mail / AirDrop verschicken.')}</span>
+  @media print{body{margin:0;padding:0}.bar{display:none}}`;
+const escHtml = x => String(x || '').replace(/[<>&"']/g, m => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' }[m]));
+function docShell({ title, barTitle, hint, seller, headTitle, nr, dt, toHtml, mainHtml }) {
+  return `<!doctype html><html lang=${LANG.cur}><head><meta charset=utf-8><title>${escHtml(title)}</title><style>${DOC_CSS}</style></head><body>
+  <div class=bar><b>${barTitle}</b><span class=muted style="flex:1">${hint}</span>
     <button class=pri onclick="window.print()">${t('Als PDF speichern')}</button><button onclick="window.close()">${t('Schließen')}</button></div>
-  <div class=row><div><h1>${esc(seller.name)}</h1><div class=muted>${esc(seller.address || '')}<br>${esc(seller.email || '')} ${esc(seller.phone || '')}</div></div>
-  <div style="text-align:right"><b>${t('Rechnung')}</b><br>${t('Nr.')} ${num}<br>${dt}</div></div>
-  <div style="margin-top:24px"><div class=muted>${t('Rechnung an')}</div><b>${esc(custName)}</b><br>${esc(c.email || '')}</div>
-  <table><thead><tr><th>${t('Position')}</th><th class=n>${t('Menge')}</th><th class=n>${t('Einzel')}</th><th class=n>${t('Betrag')}</th></tr></thead>
-  <tbody><tr><td>${esc(p.title)}${posLines}</td><td class=n>${qty}</td><td class=n>${unit.toFixed(2)} €</td><td class=n>${total.toFixed(2)} €</td></tr></tbody>
-  <tfoot><tr><td colspan=3 class="n tot">${t('Gesamt')}</td><td class="n tot">${total.toFixed(2)} €</td></tr></tfoot></table>
-  ${seller.taxnote ? '<div class=foot>' + esc(seller.taxnote) + '</div>' : ''}
-  ${seller.iban ? '<div class=foot>' + t('Zahlbar auf: ') + esc(seller.iban) + '</div>' : ''}</body></html>`;
+  <div class=row><div><h1>${escHtml(seller.name)}</h1><div class=muted>${escHtml(seller.address || '')}<br>${escHtml(seller.email || '')} ${escHtml(seller.phone || '')}</div></div>
+  <div style="text-align:right"><b>${headTitle}</b><br>${t('Nr.')} ${nr}<br>${dt}</div></div>
+  ${toHtml}
+  ${mainHtml}
+  ${seller.taxnote ? '<div class=foot>' + escHtml(seller.taxnote) + '</div>' : ''}
+  ${seller.iban ? '<div class=foot>' + t('Zahlbar auf: ') + escHtml(seller.iban) + '</div>' : ''}</body></html>`;
+}
+function showDoc(html) {
   const wnd = window.open('', '_blank');
   if (!wnd) return toast('Popup blockiert — bitte Popups erlauben.');
   wnd.document.write(html); wnd.document.close(); wnd.focus();
+}
+async function sellerOrAsk() {
+  const s = await api('/crm/settings'); const seller = s.seller || {};
+  if (!seller.name) { if (await askConfirm('Kein Rechnungs-Absender hinterlegt', 'Der Absender gehört auf die Rechnung. Jetzt unter Finanzen eintragen?', 'Zu Finanzen')) { closeDrawer(); go('revenue'); } return null; }
+  return seller;
+}
+// Rechnung öffnen. Einmal ausgestellte Rechnungen werden als Schnappschuss gespeichert und unverändert wieder geöffnet;
+// opts.regen erzeugt sie bewusst neu (gleiche Nummer, aktuelle Daten).
+async function openInvoice(pid, opts = {}) {
+  const seller = await sellerOrAsk(); if (!seller) return;
+  if (!opts.regen) { const st = await api('/crm/projects/' + pid + '/invoice').catch(() => null); if (st && st.html) return showDoc(st.html); }
+  const p = await api('/project/' + pid);
+  const c = p.contact_id ? await api('/contact/' + p.contact_id).then(x => x.contact) : {};
+  const inv = await jpost('/crm/projects/' + pid + '/invoice-number', {});   // je Projekt stabil, verbraucht beim erneuten Öffnen keine Nummer
+  const num = inv.number;
+  const qty = p.qty || 1; const total = p.calc?.price || 0; const unit = qty ? total / qty : total;
+  const custName = c.name || p.contact_name || '';
+  // Druckpositionen (falls vorhanden) als Detailzeilen unter der Hauptposition.
+  const posLines = (p.items || []).map(it => `<div class=detail>• ${escHtml(it.label || it.model_title || t('Position'))} — ${it.qty}×</div>`).join('');
+  const fnameSafe = s2 => String(s2 || '').replace(/[^\w äöüÄÖÜß.-]/g, '').trim().replace(/\s+/g, '_');
+  const title = `${t('Rechnung')}_${num}_${fnameSafe(custName) || t('Kunde')}`;
+  const html = docShell({ title, barTitle: `${t('Rechnung')} ${num}`, hint: t('→ „Als PDF speichern" und dann selbst per WhatsApp / Mail / AirDrop verschicken.'), seller,
+    headTitle: t('Rechnung'), nr: num, dt: dmy(inv.date || today()),
+    toHtml: `<div style="margin-top:24px"><div class=muted>${t('Rechnung an')}</div><b>${escHtml(custName)}</b><br>${escHtml(c.email || '')}</div>`,
+    mainHtml: `<table><thead><tr><th>${t('Position')}</th><th class=n>${t('Menge')}</th><th class=n>${t('Einzel')}</th><th class=n>${t('Betrag')}</th></tr></thead>
+  <tbody><tr><td>${escHtml(p.title)}${posLines}</td><td class=n>${qty}</td><td class=n>${unit.toFixed(2)} €</td><td class=n>${total.toFixed(2)} €</td></tr></tbody>
+  <tfoot><tr><td colspan=3 class="n tot">${t('Gesamt')}</td><td class="n tot">${total.toFixed(2)} €</td></tr></tfoot></table>` });
+  await jpost('/crm/projects/' + pid + '/invoice', { html, total, customer: custName, title: p.title }).catch(() => {});
+  showDoc(html);
+}
+// Zahlungserinnerung / Mahnung zu einer offenen Rechnung (Stufe zählt der Server hoch: 1 Erinnerung, 2 Mahnung, 3 letzte Mahnung).
+async function openReminder(pid) {
+  const seller = await sellerOrAsk(); if (!seller) return;
+  const r = await jpost('/crm/projects/' + pid + '/remind', {}); if (r.error) return toast(r.error);
+  const i = r.invoice, lvl = Math.min(r.level, 3);
+  const head = [t('Zahlungserinnerung'), t('Mahnung'), t('Letzte Mahnung')][lvl - 1];
+  const amount = i.total.toFixed(2) + ' €';
+  const sentences = [t(`Zu unserer Rechnung Nr. ${i.no} vom ${dmy(i.date)} über ${amount} (fällig am ${dmy(i.due_date)}) konnten wir bisher keinen Zahlungseingang feststellen.`),
+    lvl === 1 ? t('Möglicherweise hat sich Ihre Zahlung mit diesem Schreiben überschnitten — dann betrachten Sie es bitte als gegenstandslos.') : t(`Wir bitten Sie, den offenen Betrag bis spätestens ${dmy(r.pay_by)} zu überweisen.`),
+    lvl === 3 ? t('Andernfalls behalten wir uns weitere Schritte vor.') : ''].filter(Boolean);
+  const html = docShell({ title: `${head}_${i.no}`, barTitle: `${head} · ${t('Rechnung')} ${i.no}`, hint: t('→ „Als PDF speichern" und dann selbst per WhatsApp / Mail / AirDrop verschicken.'), seller,
+    headTitle: head, nr: i.no, dt: dmy(today()),
+    toHtml: `<div style="margin-top:24px"><div class=muted>${t('An')}</div><b>${escHtml(i.customer)}</b></div>`,
+    mainHtml: `<div style="margin-top:28px">${sentences.map(x => `<p>${escHtml(x)}</p>`).join('')}</div>
+  <table><tbody><tr><td>${t('Offener Betrag')}</td><td class="n tot">${amount}</td></tr></tbody></table>` });
+  showDoc(html);
 }
 
 // ============ CRM ============
@@ -267,6 +301,8 @@ async function renderRevenue() {
       { label: 'Ausgaben', data: pnl.monthly.map(m => -m.expense), backgroundColor: '#c1332d' }] }, options: { ...chartOpts(), scales: { ...chartOpts().scales, x: { ...chartOpts().scales.x, stacked: true }, y: { ...chartOpts().scales.y, stacked: true } } } });
   }
 
+  await addInvoiceCards(w);
+
   // Ausgaben-Verwaltung
   const exWrap = el('div');
   const drawEx = async () => { const list = await api('/expenses'); exWrap.innerHTML = '';
@@ -298,9 +334,51 @@ async function renderRevenue() {
   // Rechnungs-Absender
   const seller = d.seller || (await api('/crm/settings')).seller || {};
   const sf = {}; const sRow = (label, key, w2) => { sf[key] = el('input', { value: seller[key] || '', style: 'flex:1' }); return el('div', { class: 'row' }, el('label', { style: 'min-width:110px' }, label), sf[key]); };
-  const saveSeller = async () => { await jpost('/crm/settings', { seller: { name: sf.name.value, address: sf.address.value, email: sf.email.value, phone: sf.phone.value, iban: sf.iban.value, taxnote: sf.taxnote.value } }); toast('Absender gespeichert.'); };
+  const termsI = el('input', { type: 'number', min: 0, max: 120, value: (await api('/crm/settings')).invoice_terms_days ?? 14, style: 'width:80px' });
+  const saveSeller = async () => { await jpost('/crm/settings', { invoice_terms_days: +termsI.value, seller: { name: sf.name.value, address: sf.address.value, email: sf.email.value, phone: sf.phone.value, iban: sf.iban.value, taxnote: sf.taxnote.value } }); toast('Absender gespeichert.'); };
   w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Rechnungs-Absender (für Belege)'),
     el('div', { class: 'bd' }, sRow('Name', 'name'), sRow('Adresse', 'address'), sRow('E-Mail', 'email'), sRow('Telefon', 'phone'), sRow('IBAN', 'iban'), sRow('Steuer-Hinweis', 'taxnote'),
+      el('div', { class: 'row' }, el('label', { style: 'min-width:110px' }, 'Zahlungsziel (Tage)'), termsI),
       el('div', { class: 'row' }, el('button', { class: 'btn sm', onclick: saveSeller }, 'Speichern'), el('span', { class: 'muted', style: 'font-size:11px' }, 'z.B. „Kleinunternehmer gemäß §19 UStG, keine Umsatzsteuer."')))));
+}
+// Rechnungsarchiv (mit Mahnwesen) und Steuer-Export für die Einnahmenüberschussrechnung.
+async function addInvoiceCards(w) {
+  const inv = await api('/crm/invoices').catch(() => null);
+  if (inv && inv.items.length) {
+    const STATUS = { paid: ['bezahlt', '#1a7f37'], open: ['offen', '#6b7280'], overdue: ['überfällig', 'var(--neg)'] };
+    const tb = el('tbody', {}, inv.items.map(r => el('tr', { style: 'cursor:pointer', onclick: () => openInvoice(r.project_id) },
+      el('td', { class: 'num' }, 'RE-' + r.no), el('td', { class: 'num' }, dmy(r.date)), el('td', { class: 'title' }, r.customer), el('td', { class: 'muted' }, r.title),
+      el('td', { class: 'n' }, eur(r.total)), el('td', { class: 'num' }, r.paid ? (r.paid_at ? dmy(r.paid_at) : '–') : dmy(r.due_date)),
+      el('td', {}, el('span', { class: 'tag', style: 'background:' + STATUS[r.status][1] }, STATUS[r.status][0] + (r.overdue_days ? ' ' + r.overdue_days + ' ' + t('T') : '')),
+        r.reminder_level ? el('span', { class: 'muted', style: 'margin-left:6px;font-size:11px' }, t('Mahnstufe') + ' ' + r.reminder_level) : null),
+      el('td', {}, r.status === 'overdue' ? el('button', { class: 'btn sm', onclick: e => { e.stopPropagation(); openReminder(r.project_id).then(() => renderRevenue()); } }, r.reminder_level ? 'Nächste Mahnung' : 'Mahnung') : null,
+        el('button', { class: 'btn sm ghost', title: 'Mit aktuellen Daten neu erzeugen (gleiche Nummer)', onclick: async e => { e.stopPropagation();
+          if (await askConfirm('Rechnung neu erzeugen?', 'Die gespeicherte Rechnung wird mit den aktuellen Projektdaten überschrieben (Nummer bleibt).', 'Neu erzeugen')) openInvoice(r.project_id, { regen: true }); } }, '↻')))));
+    w.append(el('div', { class: 'card' },
+      el('div', { class: 'hd' }, 'Rechnungen', el('span', { class: 'muted', style: 'font-weight:400;text-transform:none' }, `${t('offen')} ${eur(inv.open_total)}` + (inv.overdue_total ? ` · ${t('überfällig')} ${eur(inv.overdue_total)}` : '') + ` · ${t('Zahlungsziel')} ${inv.terms_days} ${t('Tage')}`)),
+      el('div', { class: 'bd muted', style: 'padding-bottom:0' }, 'Jede ausgestellte Rechnung wird unverändert archiviert; Klick öffnet sie. Überfällige Rechnungen bekommen eine Zahlungserinnerung, dann Mahnung, dann letzte Mahnung (ohne Gebühren).'),
+      el('div', { class: 'tablewrap' }, el('table', {}, el('thead', {}, el('tr', {}, ['Nr.', 'Datum', 'Kunde', 'Projekt', 'Betrag', 'Fällig / bezahlt', 'Status', ''].map((h, i) => el('th', { class: i === 4 ? 'n' : '' }, h)))), tb))));
+  }
+  // Steuer / EÜR
+  const yNow = new Date().getFullYear(); const years = [...new Set([yNow, yNow - 1, yNow - 2, ...((inv && inv.years) || []).map(Number)])].filter(Boolean).sort((a, b) => b - a);
+  const ySel = el('select', {}, years.map(y => el('option', { value: y }, y)));
+  const body = el('div', { class: 'bd' });
+  const dl = el('a', { class: 'btn primary sm', download: '' }, 'CSV herunterladen');
+  const draw = async () => {
+    const e = await api('/crm/euer?year=' + ySel.value); body.innerHTML = '';
+    dl.href = '/api/crm/euer.csv?year=' + ySel.value;
+    body.append(el('div', { class: 'stats', style: 'border:0;margin:0 0 8px' },
+      el('div', { class: 'stat' }, el('div', { class: 'v pos' }, eur(e.income)), el('div', { class: 'l' }, 'Einnahmen')),
+      el('div', { class: 'stat' }, el('div', { class: 'v neg' }, eur(e.expense)), el('div', { class: 'l' }, 'Ausgaben')),
+      el('div', { class: 'stat', style: 'border-left:2px solid var(--accent)' }, el('div', { class: 'v ' + (e.profit >= 0 ? 'pos' : 'neg') }, eur(e.profit)), el('div', { class: 'l' }, 'Gewinn / Verlust')),
+      el('div', { class: 'stat' }, el('div', { class: 'v muted' }, eur(e.open_receivables)), el('div', { class: 'l' }, 'Offene Forderungen'), el('div', { class: 'd muted' }, 'zählt erst bei Zahlung'))));
+    const cat = (title, rows) => rows.length ? el('div', { class: 'tablewrap' }, el('table', {}, el('thead', {}, el('tr', {}, el('th', {}, title), el('th', { class: 'n' }, 'Summe'))),
+      el('tbody', {}, rows.map(r => el('tr', {}, el('td', {}, r.category), el('td', { class: 'n' }, eur(r.sum))))))) : null;
+    body.append(el('div', { class: 'grid2' }, cat('Einnahmen nach Art', e.incomeByCategory) || el('span', { class: 'muted' }, 'Keine Einnahmen.'), cat('Ausgaben nach Art', e.expenseByCategory) || el('span', { class: 'muted' }, 'Keine Ausgaben.')));
+  };
+  ySel.onchange = draw; await draw();
+  w.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Steuer-Export (Einnahmenüberschussrechnung)', el('span', { class: 'row', style: 'margin:0;font-weight:400;text-transform:none' }, ySel, dl)),
+    el('div', { class: 'bd muted', style: 'padding-bottom:0' }, 'Zuflussprinzip: Projekte zählen am Zahlungsdatum, dazu MakerWorld-Auszahlungen und die erfassten Ausgaben. Die CSV (Semikolon, Excel-tauglich) enthält jede Buchung mit Rechnungsnummer. Keine Steuerberatung — bitte mit dem Steuerberater abgleichen.'),
+    body));
 }
 const EXP_CAT = [['filament','Filament'],['drucker','Drucker'],['zubehoer','Zubehör'],['versand','Versand'],['sonstiges','Sonstiges']];

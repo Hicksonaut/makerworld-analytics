@@ -64,6 +64,15 @@ const api = async (p, opt) => {
 window.addEventListener('unhandledrejection', e => { const m = e.reason && e.reason.message ? e.reason.message : String(e.reason); if (!/HTTP \d+|Failed to fetch|Load failed/.test(m)) showBanner('Unerwarteter Fehler: ' + m); });
 const jpost = (p, body, m = 'POST') => api(p, { method: m, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 const fmt = n => n == null ? '–' : Number(n).toLocaleString(LOC());
+// Anzeigenamen der Änderungstypen (Timeline, Auswertung).
+const EVT_LABEL = { thumbnail: 'Titelbild', title: 'Titel', description: 'Beschreibung', tags: 'Tags', price: 'Preis', files: 'Dateien', other: 'Sonstiges' };
+// Urteil eines Experiments (siehe server/experiments.js) als kleines Etikett.
+function verdictBadge(x) {
+  const [txt, col] = x.status === 'running' ? [t('läuft noch ' + x.daysLeft + ' Tage'), '#6b7280'] : x.status === 'nodata' ? [t('zu wenig Daten'), '#6b7280']
+    : x.verdict === 'helped' ? [t('hat geholfen'), '#1a7f37'] : x.verdict === 'hurt' ? [t('schadet'), 'var(--neg)'] : [t('neutral'), '#9a6a00'];
+  const tip = x.status === 'done' ? `CTR ${fmt1(x.before.ctr)}% → ${fmt1(x.after.ctr)}% (${x.ctrDeltaPct > 0 ? '+' : ''}${fmt1(x.ctrDeltaPct)}%)` + (x.confounded ? ' · ' + t('weitere Änderung im Zeitraum') : '') : '';
+  return el('span', { class: 'tag', style: 'background:' + col + ';margin-left:6px', title: tip }, txt);
+}
 const fmt1 = n => n == null ? '–' : Number(n).toLocaleString(LOC(), { maximumFractionDigits: 1 });
 const eur = n => n == null ? '–' : Number(n).toLocaleString(LOC(), { style: 'currency', currency: 'EUR' });
 const rate = () => STATE.overview?.settings?.eur_per_point || (40 / 524);

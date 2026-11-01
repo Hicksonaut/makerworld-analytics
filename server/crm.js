@@ -128,7 +128,7 @@ function syncDeliverTodo(p) {
     for (const t of open) db.prepare('UPDATE todos SET done=1, done_at=? WHERE id=?').run(nowIso(), t.id);
   }
 }
-function projectWithCalc(p, s) {
+export function projectWithCalc(p, s) {
   const parts = db.prepare(`SELECT pp.id, pp.qty, pt.name, pt.unit, pt.unit_price, pt.category
     FROM project_parts pp JOIN parts pt ON pt.id=pp.part_id WHERE pp.project_id=?`).all(p.id);
   const items = db.prepare(`SELECT i.*, m.title AS model_title FROM project_items i
@@ -389,13 +389,14 @@ crm.delete('/parts/:id', (req, res) => {
 
 // ---- Kalkulations-Einstellungen (global) ----------------------------------
 const sellerInfo = () => { try { return JSON.parse(getSetting('invoice_seller', '{}')); } catch { return {}; } };
-crm.get('/crm/settings', (req, res) => res.json({ ...calcSettings(), seller: sellerInfo(), invoice_next: +getSetting('invoice_next', '1') }));
+crm.get('/crm/settings', (req, res) => res.json({ ...calcSettings(), seller: sellerInfo(), invoice_next: +getSetting('invoice_next', '1'), invoice_terms_days: +getSetting('invoice_terms_days', '14') }));
 crm.post('/crm/settings', (req, res) => {
   const b = req.body || {};
   if (b.filament_price_kg != null) setSetting('calc_filament_kg', String(+b.filament_price_kg));
   if (b.energy_rate_h != null) setSetting('calc_energy_h', String(+b.energy_rate_h));
   if (b.labor_rate_h != null) setSetting('calc_labor_h', String(+b.labor_rate_h));
   if (b.round_to != null) setSetting('calc_round', String(+b.round_to));
+  if (b.invoice_terms_days != null) setSetting('invoice_terms_days', String(Math.max(0, Math.min(120, Math.round(+b.invoice_terms_days) || 0))));
   if (Array.isArray(b.tiers)) {
     const tiers = b.tiers.filter(t => t.name).map(t => ({ name: String(t.name), margin: +t.margin || 0, ...(t.default ? { default: true } : {}) }));
     if (tiers.length && !tiers.some(t => t.default)) tiers[0].default = true;       // immer genau eine Standard-Stufe

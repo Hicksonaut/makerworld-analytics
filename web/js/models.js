@@ -344,18 +344,28 @@ function flash(node) { node.textContent = t('✓ gespeichert'); node.classList.a
 
 function renderEventEditor(design_id, events) {
   const list = el('ul', { class: 'timeline' });
+  let exps = {};   // Experiment-Urteile je Ereignis
+  const loadExps = () => api('/experiments?design_id=' + encodeURIComponent(design_id)).then(r => { exps = Object.fromEntries((r.items || []).map(x => [x.id, x])); draw(events); }).catch(() => {});
   const draw = evs => { list.innerHTML = ''; if (!evs.length) list.append(el('li', { class: 'muted' }, 'Noch keine Änderungen erfasst.'));
-    evs.forEach(ev => list.append(el('li', {}, el('span', { class: 'date' }, dmy(ev.date)), el('span', { class: 'pill' }, ev.type || 'other'),
-      el('div', { style: 'flex:1' }, el('b', {}, ev.title || '(ohne Titel)'), ev.note ? el('div', { class: 'muted' }, ev.note) : null),
+    evs.forEach(ev => list.append(el('li', {}, el('span', { class: 'date' }, dmy(ev.date)), el('span', { class: 'pill' }, EVT_LABEL[ev.type] || ev.type || 'Sonstiges'),
+      el('div', { style: 'flex:1' }, el('b', {}, ev.title || '(ohne Titel)'), exps[ev.id] ? verdictBadge(exps[ev.id]) : null, ev.note ? el('div', { class: 'muted' }, ev.note) : null,
+        ev.hypothesis ? el('div', { class: 'muted' }, t('Hypothese') + ': ' + ev.hypothesis) : null,
+        exps[ev.id] ? el('a', { href: '#', class: 'muted', style: 'font-size:11px', onclick: async e => { e.preventDefault();
+          const h = await askText({ title: 'Hypothese', text: 'Was soll die Änderung bewirken? Nach der Frist wird sie automatisch gegen die CTR geprüft.', value: ev.hypothesis || '', placeholder: 'z. B. Neues Cover steigert die CTR', okText: 'Speichern' });
+          if (h == null) return; const nv = await jpost('/events/' + ev.id, { hypothesis: h }, 'PUT'); ev.hypothesis = nv.hypothesis; loadExps(); } }, ev.hypothesis ? t('Hypothese ändern') : t('Hypothese ergänzen')) : null),
       el('button', { class: 'btn sm ghost', onclick: async () => { await delWithUndo('/events/' + ev.id, 'Eintrag', async () => { const nd = await api('/events?design_id=' + design_id); events.splice(0, events.length, ...nd); draw(events); }); draw(evs = evs.filter(x => x.id !== ev.id)); } }, '✕')))); };
   draw(events);
   const dateI = el('input', { type: 'date', value: today() });
-  const typeI = el('select', {}, ['thumbnail','title','description','tags','price','files','other'].map(t => el('option', { value: t }, t)));
+  const typeI = el('select', {}, ['thumbnail','title','description','tags','price','files','other'].map(k => el('option', { value: k }, EVT_LABEL[k])));
   const titleI = el('input', { placeholder: 'Was geändert?', style: 'flex:1;min-width:160px' });
   const noteI = el('input', { placeholder: 'Notiz (optional)', style: 'flex:1;min-width:160px' });
+  const hypI = el('input', { placeholder: 'Hypothese (optional), z. B. „Neues Cover steigert die CTR“', style: 'flex:2;min-width:220px' });
+  const daysI = el('select', { title: 'Auswertung nach …' }, [7, 14, 21, 28].map(n => el('option', { value: n, selected: n === 14 }, n + ' ' + t('Tage'))));
   const add = async () => { if (!titleI.value && !noteI.value) return;
-    const ev = await jpost('/events', { design_id, date: dateI.value, type: typeI.value, title: titleI.value, note: noteI.value });
-    events.unshift(ev); draw(events); titleI.value = ''; noteI.value = ''; };
+    const ev = await jpost('/events', { design_id, date: dateI.value, type: typeI.value, title: titleI.value, note: noteI.value, hypothesis: hypI.value, eval_days: +daysI.value });
+    events.unshift(ev); titleI.value = ''; noteI.value = ''; hypI.value = ''; loadExps(); };
+  loadExps();
   return el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Änderungs-Timeline'),
-    el('div', { class: 'bd' }, el('div', { class: 'row' }, dateI, typeI, titleI, noteI, el('button', { class: 'btn primary sm', onclick: add }, '+ Eintrag')), list));
+    el('div', { class: 'bd' }, el('div', { class: 'row' }, dateI, typeI, titleI, noteI, el('button', { class: 'btn primary sm', onclick: add }, '+ Eintrag')),
+      el('div', { class: 'row', style: 'margin-top:6px' }, hypI, daysI), list));
 }

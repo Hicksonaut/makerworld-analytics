@@ -378,6 +378,28 @@ if (getSetting('milestones_dedupe_v1', '0') !== '1') {
   } catch (e) { console.log('[migration] Meilenstein-Bereinigung fehlgeschlagen:', e.message); }
 }
 
+// Rechnungsarchiv: unveraenderlicher Schnappschuss (HTML) je ausgestellter Rechnung + Mahnstufe.
+db.exec(`CREATE TABLE IF NOT EXISTS invoices (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id     INTEGER UNIQUE NOT NULL,
+  no             INTEGER,
+  date           TEXT,          -- Rechnungsdatum
+  due_date       TEXT,          -- Faelligkeit (Datum + Zahlungsziel)
+  customer       TEXT,
+  title          TEXT,
+  total          REAL,
+  html           TEXT,
+  reminder_level INTEGER DEFAULT 0,
+  last_reminder_at TEXT,
+  created_at     TEXT
+);`);
+
+// Experimente: eine Aenderung (Titelbild/Titel/Tags/Beschreibung) kann eine Hypothese tragen und wird nach
+// `eval_days` automatisch ausgewertet (siehe experiments.js). verdict/evaluated_at halten das Ergebnis fest.
+for (const [c, d] of [['hypothesis', 'TEXT'], ['eval_days', 'INTEGER'], ['verdict', 'TEXT'], ['evaluated_at', 'TEXT']]) {
+  if (!db.prepare('PRAGMA table_info(events)').all().some(x => x.name === c)) db.exec(`ALTER TABLE events ADD COLUMN ${c} ${d}`);
+}
+
 // Papierkorb (siehe trash.js): geloeschte Datensaetze 30 Tage wiederherstellbar.
 db.exec(`CREATE TABLE IF NOT EXISTS trash (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
