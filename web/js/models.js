@@ -57,7 +57,8 @@ async function openPlanned(id) {
   statusSel.onchange = async () => { await jpost('/model/' + id + '/status', { status: statusSel.value }, 'PUT'); loadOverview(); };
   inner.append(el('div', { class: 'dh' },
     el('div', { style: 'flex:1' }, el('div', { class: 'row', style: 'margin:0 0 4px' }, el('span', { class: 'tag', style: 'background:#6b7280' }, 'GEPLANT'), titleI),
-      el('div', { class: 'muted' }, 'Wird beim Pull automatisch mit dem echten Modell verschmolzen, sobald der Titel übereinstimmt.')),
+      el('div', { class: 'muted' }, 'Wird beim Pull automatisch mit dem echten Modell verschmolzen, sobald der Titel übereinstimmt.'),
+      (d.crmProjects || []).filter(x => x.self).map(x => el('div', { class: 'muted' }, 'Eigenprojekt: ', el('a', { href: '#', onclick: e => { e.preventDefault(); openProject(x.id); } }, x.title)))),
     el('div', { class: 'row', style: 'margin:0;align-items:center' }, el('label', {}, 'Status'), statusSel),
     el('span', { class: 'close', onclick: closeDrawer }, '✕')));
   const body = el('div', { class: 'dbody' }); inner.append(body);

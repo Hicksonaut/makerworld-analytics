@@ -85,8 +85,13 @@ and the data never leaves it.
   users use each tag overall (MakerWorld's suggestion API exposes usage counts,
   and it also asks what people type after your main term), scores them together
   with your own tag performance, drops block-listed words and near-duplicates and
-  proposes up to 50 tags tiered *broad / medium / niche*. One click merges the
-  selection into your draft tags.
+  proposes up to 50 tags tiered *broad / medium / niche*. Models are weighted by
+  how similar they are to yours, German title words are translated (Bierdeckel →
+  coaster) and a switch picks **close to the original** (only tags that fit your
+  model; generic giants like *decor* or *art* are dropped) or **more reach**. One
+  click merges the selection into your draft tags; for already published models
+  *Add selection on MakerWorld* fills MakerWorld's edit editor and saves an
+  **edit draft** — the live model only changes when you click *Publish* there.
 - **Upload assistant (draft only):** a planned model gets an *upload pack*
   (Bambu 3MF or raw model, covers 4:3 / 3:4, real print photos, category,
   description, tags) with a checklist. One click opens MakerWorld's own editor in
@@ -94,6 +99,13 @@ and the data never leaves it.
   in and **saves a draft** — it never publishes; you review and publish on
   MakerWorld. Browser jobs run one at a time and never alongside the pull.
   Experimental: it drives a third-party web UI that can change without notice.
+- **Own projects = upload planning:** an own project is the plan for a future
+  MakerWorld model, not a customer job. It owns a planned model (description,
+  tags, notes, upload pack, tag assistant) and runs through *Idea → Modeling →
+  Test print → Photos → Upload pack → Draft → Published*. There is deliberately no
+  MakerWorld link while planning (weight/print time come from your slicer); after
+  publishing, the pull links the real model by title (or link it manually) and the
+  earnings appear.
 - Parts catalog (magnets, screws, inserts …) with unit prices that flow into
   the calculation.
 - **"Did this project pay off?"** — because a model you made privately for a
@@ -240,10 +252,10 @@ one SQLite file under `data/` (git-ignored).
 server/   index.js (setup, host protection, mounting)  db.js  i18n.js  trash.js
           routes-models.js  routes-analytics.js  kpi.js  insights.js  health.js
           ops.js (pull, login, settings, cron)  experiments.js  invoices.js
-          mwjobs.js (browser jobs)  tags.js  upload.js  mw-categories.json
+          mwjobs.js (browser jobs)  tags.js  upload.js  plan.js  mw-categories.json
           crm.js  ingest.js  scraper.js  public.js  publicPage.js  seed-demo.js
 web/      index.html  styles.css  favicon.svg  vendor/chart.umd.min.js
-web/js/   core.js  i18n-en.js  ui.js  a11y.js  analytics.js  todos.js  models.js
+web/js/   core.js  i18n-en.js  ui.js  a11y.js  analytics.js  todos.js  models.js  mwupload.js  selfprojects.js
           today.js  crm.js  projects.js  production.js  system.js  boot.js
           (plain scripts sharing one global scope, loaded in this order)
 tests/    api, operations, ui and i18n tests (node:test + Playwright)

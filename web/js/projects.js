@@ -4,6 +4,7 @@
 async function openProject(id) {
   const s = await api('/crm/settings');
   let full = await api('/project/' + id);
+  if (full.self) return openSelfProject(id, full);   // Eigenprojekt = Upload-Planung (selfprojects.js)
   const p = { ...full };                          // veraenderbarer Zustand
   let parts = full.parts || [];
   let items = full.items || [];                   // Druckpositionen (mehrere Modelle/Profile)
@@ -352,7 +353,7 @@ async function renderProjekte() {
 // ---- Eigenprojekte (kein Kunde): Modellieren → Drucken → Fotos → MW-Eintrag → Veröffentlicht ----
 async function renderSelfProjects() {
   if (!STATE.overview) await loadOverview();
-  const w = pagehead('Eigenprojekte', 'Eigene Modelle planen: modellieren, drucken, fotografieren, MakerWorld-Eintrag erstellen und veröffentlichen. Ohne Kunde.');
+  const w = pagehead('Eigenprojekte', 'Planung des MakerWorld-Uploads: modellieren, testdrucken, fotografieren, Upload-Paket erstellen, Entwurf anlegen und veröffentlichen. Die Verbindung zu MakerWorld entsteht erst nach dem Veröffentlichen.');
   const nameI = el('input', { placeholder: 'Neues Eigenprojekt …', style: 'flex:1;min-width:160px' });
   const prioI = mkSelect(PRIORITIES, '1', 'sm'); const dueI = el('input', { type: 'date' });
   const add = async () => { if (!nameI.value.trim()) return; const np = await jpost('/projects', { self: 1, title: nameI.value.trim(), priority: +prioI.value, due_date: dueI.value || null }); nameI.value = ''; dueI.value = ''; openProject(np.id); };
@@ -371,7 +372,7 @@ async function renderSelfProjects() {
       const card = el('div', { class: 'kcard', onclick: () => openProject(p.id) },
         el('div', { class: 'kt' }, p.title),
         el('div', { class: 'krow' }, prioBadge(p.priority), deadlineBadge(p.due_date)),
-        el('div', { class: 'muted', style: 'font-size:11px' }, (p.model_title ? p.model_title + ' · ' : '') + 'Kosten ' + eur(c.cost) + (p.mw && p.mw.earned ? ' · MW ' + eur(p.mw.earned) : '')), sel);
+        el('div', { class: 'muted', style: 'font-size:11px' }, (p.plan ? `Upload-Paket ${p.plan.done}/${p.plan.total}` + (p.plan.draft ? ' · Entwurf' : '') + ' · ' : '') + 'Kosten ' + eur(c.cost) + (p.mw && p.mw.earned ? ' · MW ' + eur(p.mw.earned) : '')), sel);
       dndCard(card, p.id);
       col.append(card);
     });

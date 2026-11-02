@@ -4,8 +4,9 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { db, DATA_DIR, IMAGES_DIR, nowIso } from './db.js';
+import { db, DATA_DIR, IMAGES_DIR, nowIso, getSetting } from './db.js';
 import { T } from './i18n.js';
+import { mergePlanInto } from './plan.js';
 
 const iso = s => String(s || '').replace(/\//g, '-');
 const cell = (row, f) => { const v = row?.[f]; return (v && typeof v === 'object') ? 0 : (v ?? 0); };
@@ -133,8 +134,12 @@ const stripQuery = u => String(u || '').split('?')[0];
 function autoEvent(id, type, note, capturedAt) {
   const day = capturedAt.slice(0, 10);
   if (db.prepare('SELECT 1 FROM events WHERE design_id=? AND type=? AND date=?').get(id, type, day)) return false;
-  db.prepare('INSERT INTO events(design_id,date,type,title,note,created_at) VALUES(?,?,?,?,?,?)')
+  const r = db.prepare('INSERT INTO events(design_id,date,type,title,note,created_at) VALUES(?,?,?,?,?,?)')
     .run(id, day, type, T('automatisch erkannt', 'detected automatically'), note, capturedAt);
+  if (type === 'tags') {   // Tag-Assistent hat Tags vorbereitet -> die erkannte Aenderung wird als Experiment mit Hypothese ausgewertet
+    const hint = getSetting('tag_hypothesis:' + id, null);
+    if (hint) { db.prepare('UPDATE events SET hypothesis=?, eval_days=14 WHERE id=?').run(T('Zusätzliche passende Tags (Tag-Assistent) erhöhen die Reichweite', 'Additional matching tags (tag assistant) increase reach'), r.lastInsertRowid); db.prepare('DELETE FROM settings WHERE key=?').run('tag_hypothesis:' + id); }
+  }
   return true;
 }
 function detectChanges(id, old, { title, description, tags, coverHash, updateTime, detailOk }, capturedAt) {
@@ -248,23 +253,11 @@ export async function writeModel({ id, pp, detail = {}, capturedAt }) {
            tags: detail.tagCount ?? 0, images: detail.images?.length ?? 0, merged };
 }
 
-// Geplantes Modell mit gleichem Titel in das jetzt echte Modell verschmelzen:
-// Notizen/Ziele/Gruppe uebernehmen, Todos/Events umhaengen, Platzhalter loeschen.
+// Geplantes Modell mit gleichem Titel in das jetzt echte Modell verschmelzen (siehe plan.js).
 function mergePlanned(realId, title) {
   const planned = db.prepare(
-    "SELECT * FROM models WHERE planned=1 AND design_id!=? AND lower(trim(title))=lower(trim(?))").all(realId, title || '');
-  if (!planned.length) return 0;
-  db.transaction(() => {
-    for (const p of planned) {
-      db.prepare('UPDATE todos SET design_id=? WHERE design_id=?').run(realId, p.design_id);
-      db.prepare('UPDATE events SET design_id=? WHERE design_id=?').run(realId, p.design_id);
-      db.prepare(`UPDATE models SET
-        notes=COALESCE(notes,?), group_label=COALESCE(group_label,?),
-        goal_download=COALESCE(goal_download,?), goal_view=COALESCE(goal_view,?), goal_point=COALESCE(goal_point,?)
-        WHERE design_id=?`).run(p.notes, p.group_label, p.goal_download, p.goal_view, p.goal_point, realId);
-      db.prepare('DELETE FROM models WHERE design_id=?').run(p.design_id);
-    }
-  })();
+    "SELECT design_id FROM models WHERE planned=1 AND design_id!=? AND lower(trim(title))=lower(trim(?))").all(realId, title || '');
+  for (const p of planned) mergePlanInto(p.design_id, realId);
   return planned.length;
 }
 

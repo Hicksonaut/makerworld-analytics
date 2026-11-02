@@ -203,6 +203,51 @@ export async function createDraft(page, { model, pack, log }) {
   return { draft_id: draftId, url: `${BASE}/my/models/drafts/${draftId}/edit`, report };
 }
 
+// ---- Tags zu einem bestehenden (veroeffentlichten) Modell ergaenzen ---------------------------------------------------
+// MakerWorlds "Bearbeiten" nutzt einen Bearbeitungs-Entwurf: Speichern aendert das Live-Modell NICHT, erst "Veroeffentlichen" im Editor.
+export async function addTagsToModel(page, { design_id, tags, log }) {
+  log(T('Öffne den Bearbeiten-Editor des Modells …', 'Opening the model\'s edit editor …'));
+  await page.goto(`${BASE}/my/models/${design_id}/edit`, { waitUntil: 'domcontentloaded', timeout: 60000 }); await sleep(7000);
+  await page.getByText('Alle ablehnen').first().click({ timeout: 2500 }).catch(() => {});
+  const props = await page.evaluate(() => { const p = window.__NEXT_DATA__?.props?.pageProps || {}; return { draftId: p.detail?.id, existing: p.detail?.tags || [], forbidden: p.forbiddenWords || [] }; });
+  if (!props.draftId) throw new Error(T('Bearbeiten-Editor nicht verfügbar (Modell nicht gefunden oder nicht bearbeitbar).', 'Edit editor not available (model not found or not editable).'));
+  if (props.forbidden.length) setSetting('mw_forbidden_words', JSON.stringify(props.forbidden));
+  const have = new Set(props.existing.map(t => String(t).trim().toLowerCase())), bad = props.forbidden.map(w => String(w).toLowerCase());
+  const fresh = [], skipped = [];
+  for (const raw of tags) {
+    const t = String(raw).replace(/[,;]/g, ' ').replace(/\s+/g, ' ').trim(), k = t.toLowerCase();
+    if (!t || t.length > 40 || have.has(k) || bad.some(w => w && k.includes(w))) { skipped.push(t); continue; }
+    if (props.existing.length + fresh.length >= MAX_TAGS) { skipped.push(t); continue; }
+    fresh.push(t); have.add(k);
+  }
+  if (!fresh.length) { log(T('Nichts zu ergänzen: alle gewählten Tags sind schon vorhanden, zu lang, gesperrt oder das Limit von 50 ist erreicht.', 'Nothing to add: all selected tags already exist, are too long, blocked, or the limit of 50 is reached.')); return { draft_id: props.draftId, added: [], skipped, url: `${BASE}/my/models/${design_id}/edit` }; }
+  const texts = page.locator('input[type=text]'), n = await texts.count(); let ti = -1;
+  for (let i = 0; i < n; i++) if ((await texts.nth(i).getAttribute('name')) === 'title') ti = i;
+  if (ti < 0) throw new Error(T('Titelfeld im Editor nicht gefunden (MakerWorld hat das Formular geändert?).', 'Title field not found in the editor (did MakerWorld change the form?).'));
+  const tagIn = texts.nth(ti + 2); await tagIn.click();
+  for (const t of fresh) { await tagIn.fill(t); await page.keyboard.press('Enter'); await sleep(150); }
+  log(T(`${fresh.length} Tags ergänzt (vorher ${props.existing.length}), speichere als Entwurf …`, `${fresh.length} tags added (previously ${props.existing.length}), saving as draft …`));
+  const saved = page.waitForResponse(r => /my\/draft\/\d+$/.test(r.url()) && r.request().method() === 'PUT', { timeout: 60000 }).catch(() => null);
+  await page.getByRole('button', { name: 'Als Entwurf speichern' }).click({ timeout: 15000 });
+  const sr = await saved; await sleep(2500);
+  if (!sr || !sr.ok()) throw new Error(T('MakerWorld hat das Speichern nicht bestätigt.', 'MakerWorld did not confirm saving.'));
+  let sent = null; try { sent = sr.request().postDataJSON().tags || []; } catch {}
+  if (sent && sent.length < props.existing.length + fresh.length) log(T(`Hinweis: im Entwurf stehen ${sent.length} Tags statt ${props.existing.length + fresh.length}.`, `Note: the draft has ${sent.length} tags instead of ${props.existing.length + fresh.length}.`));
+  log(T('Entwurf gespeichert. Zum Übernehmen im MakerWorld-Editor auf „Veröffentlichen“ klicken.', 'Draft saved. To apply it, click "Publish" in the MakerWorld editor.'));
+  return { draft_id: props.draftId, added: fresh, skipped, total: sent ? sent.length : props.existing.length + fresh.length, url: `${BASE}/my/models/${design_id}/edit` };
+}
+app.post('/api/tags/apply', (req, res) => {
+  const { design_id } = req.body || {}, m = db.prepare('SELECT design_id,planned FROM models WHERE design_id=?').get(design_id || '');
+  if (!m) return res.status(404).json({ error: T('Modell nicht gefunden', 'model not found') });
+  if (m.planned) return res.status(400).json({ error: T('Geplante Modelle haben noch keine MakerWorld-Seite - Tags stehen im Upload-Paket.', 'Planned models have no MakerWorld page yet - tags belong to the upload pack.') });
+  const tags = (Array.isArray(req.body.tags) ? req.body.tags : []).map(x => String(x)).filter(x => x.trim()).slice(0, MAX_TAGS);
+  if (!tags.length) return res.status(400).json({ error: T('Keine Tags gewählt', 'no tags selected') });
+  res.json(startMwJob('tags-upload', async ({ page, log }) => {
+    const r = await addTagsToModel(page, { design_id, tags, log });
+    if (r.added.length) setSetting('tag_hypothesis:' + design_id, JSON.stringify({ at: nowIso(), added: r.added.length }));
+    return r;
+  }));
+});
 app.post('/api/upload/:id/draft', (req, res) => {
   const m = need(req, res); if (!m) return;
   if (!m.planned) return res.status(400).json({ error: T('Nur geplante Modelle lassen sich hochladen.', 'Only planned models can be uploaded.') });
@@ -212,6 +257,7 @@ app.post('/api/upload/:id/draft', (req, res) => {
   res.json(startMwJob('upload', async ({ page, log }) => {
     const r = await createDraft(page, { model: m, pack, log });
     db.prepare('UPDATE upload_packs SET draft_id=?, draft_url=?, draft_at=?, report=?, updated_at=? WHERE design_id=?').run(r.draft_id, r.url, nowIso(), JSON.stringify(r.report), nowIso(), id);
+    advanceToDraft(id);
     return r;
   }));
 });
@@ -228,3 +274,16 @@ app.post('/api/upload/:id/draft/delete', (req, res) => {
     log(T('Entwurf bei MakerWorld gelöscht.', 'Draft deleted on MakerWorld.')); return { deleted: draft };
   }));
 });
+
+// Fortschritt der Upload-Planung eines geplanten Modells (ohne Paket-Zeile anzulegen): { done, total, ready }
+export function planProgress(id) {
+  const m = modelOf(id); if (!m) return null;
+  const row = db.prepare('SELECT * FROM upload_packs WHERE design_id=?').get(id);
+  const pack = row ? { ...row, files: JSON.parse(row.files || '[]') } : { category_id: null, files: [] };
+  const cl = checklist(m, pack);
+  return { done: cl.items.filter(i => i.ok).length, total: cl.items.length, ready: cl.ready, draft: !!row?.draft_id };
+}
+// Nach erfolgreichem Entwurf: Eigenprojekt rueckt auf "Entwurf bei MakerWorld" vor (nur aus fruehen Stufen)
+export function advanceToDraft(designId) {
+  db.prepare("UPDATE projects SET stage='entwurf' WHERE design_id=? AND self=1 AND stage IN ('idee','modellierung','druck','fotos','eintrag')").run(designId);
+}

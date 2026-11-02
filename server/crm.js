@@ -6,6 +6,8 @@ import path from 'path';
 import { db, DATA_DIR, nowIso, getSetting, setSetting } from './db.js';
 import { trashPut, newAcc, addRows, rowsOf } from './trash.js';
 import { T } from './i18n.js';
+import { ensurePlan, isPlanId, mergePlanInto } from './plan.js';
+import { planProgress } from './upload.js';
 
 // Automatische Aufgaben: Titel in der aktuellen Sprache anlegen, beim Suchen/Erledigen aber BEIDE Sprachen erkennen
 // (so bleiben bereits angelegte deutsche Aufgaben und Sprachwechsel kompatibel).
@@ -232,6 +234,7 @@ crm.post('/projects', (req, res) => {
     isSelf ? 1 : 0, b.priority != null ? +b.priority : 1, nowIso());
   if (b.paid) db.prepare('UPDATE projects SET paid_at=? WHERE id=?').run(new Date().toISOString().slice(0, 10), r.lastInsertRowid);
   const np = db.prepare('SELECT * FROM projects WHERE id=?').get(r.lastInsertRowid);
+  if (isSelf && !np.design_id) np.design_id = ensurePlan(np);   // Eigenprojekt = Plan fuer den spaeteren Upload
   syncPaymentTodo(np); syncUploadTodo(np); syncDeliverTodo(np);
   res.json(projectWithCalc(np, calcSettings()));
 });
@@ -267,6 +270,7 @@ crm.put('/projects/:id', (req, res) => {
     db.prepare('UPDATE projects SET close_date=? WHERE id=?').run(new Date().toISOString().slice(0, 10), req.params.id);
     upd = db.prepare('SELECT * FROM projects WHERE id=?').get(req.params.id);
   }
+  if (upd.self && isPlanId(upd.design_id) && upd.title !== cur.title) db.prepare('UPDATE models SET title=?, updated_at=? WHERE design_id=? AND planned=1').run(upd.title, nowIso(), upd.design_id);   // Titel bleibt gleich (Verschmelzen per Titel)
   syncPaymentTodo(upd); syncUploadTodo(upd); syncDeliverTodo(upd);
   res.json(projectWithCalc(upd, calcSettings()));
 });
@@ -354,12 +358,30 @@ crm.get('/crm/projects', (req, res) => {
   res.json(rows);
 });
 // Eigenprojekte (kein Kunde): eigene Planung Modellieren->Drucken->Fotos->Eintrag->Veröffentlicht.
+// Einmalig: Eigenprojekte ohne Modell-Verknuepfung bekommen ihr geplantes Modell (Planung des Uploads), ausser sie sind schon veroeffentlicht/abgebrochen.
+if (getSetting('self_plan_v1', '0') !== '1') {
+  try {
+    const rows = db.prepare("SELECT * FROM projects WHERE self=1 AND design_id IS NULL AND COALESCE(stage,'idee') NOT IN ('publish','abgebrochen')").all();
+    for (const p of rows) ensurePlan(p);
+    setSetting('self_plan_v1', '1'); if (rows.length) console.log('[migration] ' + rows.length + ' Eigenprojekt(e) mit geplantem Modell verknuepft');
+  } catch (e) { console.log('[migration] self_plan_v1 fehlgeschlagen:', e.message); }
+}
 crm.get('/crm/self-projects', (req, res) => {
   const s = calcSettings();
   const rows = db.prepare(`SELECT p.*, m.title model_title FROM projects p
     LEFT JOIN models m ON m.design_id=p.design_id WHERE p.self=1
-    ORDER BY p.priority DESC, (p.due_date IS NULL), p.due_date, p.id DESC`).all().map(p => projectWithCalc(p, s));
+    ORDER BY p.priority DESC, (p.due_date IS NULL), p.due_date, p.id DESC`).all().map(p => ({ ...projectWithCalc(p, s), plan: isPlanId(p.design_id) ? planProgress(p.design_id) : null }));
   res.json(rows);
+});
+// Eigenprojekt manuell mit dem veroeffentlichten MakerWorld-Modell verknuepfen (wenn der Titel nicht identisch ist und der Pull nicht automatisch verschmilzt).
+crm.post('/crm/projects/:id/link', (req, res) => {
+  const p = db.prepare('SELECT * FROM projects WHERE id=? AND self=1').get(req.params.id);
+  if (!p) return res.status(404).json({ error: T('Eigenprojekt nicht gefunden', 'own project not found') });
+  const real = db.prepare('SELECT design_id, planned FROM models WHERE design_id=?').get(req.body?.design_id || '');
+  if (!real || real.planned) return res.status(400).json({ error: T('Bitte ein veröffentlichtes MakerWorld-Modell wählen.', 'Please choose a published MakerWorld model.') });
+  if (isPlanId(p.design_id)) mergePlanInto(p.design_id, real.design_id);
+  else db.prepare("UPDATE projects SET design_id=?, published=1, stage='publish' WHERE id=?").run(real.design_id, p.id);
+  res.json(projectWithCalc(db.prepare('SELECT * FROM projects WHERE id=?').get(p.id), calcSettings()));
 });
 
 // ---- Teile-Katalog ("SAP") ------------------------------------------------

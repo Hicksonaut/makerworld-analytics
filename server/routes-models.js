@@ -75,7 +75,7 @@ app.get('/api/model/:id', (req, res) => {
       AND (url LIKE '%/design/%' OR url LIKE '%/instance/%') ORDER BY position`).all(id);
   const todos = modelTodos(id);
   const instances = modelInstances(id);
-  const crmProjects = db.prepare(`SELECT p.id, p.title, p.stage, p.price, COALESCE(c.name, 'Eigenprojekt') contact_name, c.id contact_id
+  const crmProjects = db.prepare(`SELECT p.id, p.title, p.stage, p.price, p.self, COALESCE(c.name, 'Eigenprojekt') contact_name, c.id contact_id
     FROM projects p LEFT JOIN contacts c ON c.id=p.contact_id WHERE p.design_id=? ORDER BY p.id DESC`).all(id);
   res.json({ model: { ...model, tags: model.tags ? JSON.parse(model.tags) : [] }, snaps, daily, traffic, events, images, todos, instances, crmProjects });
 });
@@ -197,6 +197,7 @@ app.put('/api/model/:id/meta', (req, res) => {
   }
   db.prepare('UPDATE models SET title=?, description=?, tags=?, tag_count=?, updated_at=? WHERE design_id=?')
     .run(title != null ? title : cur.title, description != null ? description : cur.description, tagsJson, tagCount, nowIso(), req.params.id);
+  if (title != null && cur.planned && title !== cur.title) db.prepare('UPDATE projects SET title=? WHERE design_id=? AND self=1').run(title, req.params.id);   // Eigenprojekt traegt denselben Titel
   res.json({ ok: true });
 });
 

@@ -476,3 +476,32 @@ Object.assign(TR, {
   'Läuft … (bitte Fenster offen lassen, das dauert je nach Dateigröße einige Minuten)': 'Running … (keep this window open; it takes a few minutes depending on file size)', 'Entwurf': 'Draft', 'Kategorie': 'Category'
 });
 Object.assign(TR, { 'GEPLANT': 'PLANNED' });
+
+// ---- Eigenprojekte als Upload-Planung, Tag-Upload ----
+TR_RULES.unshift(
+  [/^Upload-Paket (\d+)\/(\d+)$/, 'Upload pack $1/$2'],
+  [/^(\d+) ausgewählte Tags werden im Bearbeiten-Editor deines Modells bei MakerWorld ergänzt und als Entwurf gespeichert\. Das Live-Modell ändert sich erst, wenn du dort auf „Veröffentlichen“ klickst\.$/,
+    '$1 selected tags are added in the edit editor of your model on MakerWorld and saved as a draft. The live model only changes when you click "Publish" there.']);
+Object.assign(TR, {
+  'Entwurf bei MakerWorld': 'Draft on MakerWorld', 'Upload-Paket': 'Upload pack', 'Testdruck': 'Test print', 'nah am Original': 'close to the original', 'mehr Reichweite': 'more reach',
+  'gründlich fragt zusätzlich ab, was Nutzer zu deinen Begriffen tippen (dauert länger)': 'thorough also queries what users type after your terms (takes longer)',
+  'nah am Original: nur Tags, die zu deinem Modell passen. Mehr Reichweite: auch allgemeine Tags wie decor, art, design.': 'close to the original: only tags that fit your model. More reach: also general tags such as decor, art, design.',
+  'Ergänzt die gewählten Tags im Bearbeiten-Editor bei MakerWorld und speichert als Entwurf. Das Live-Modell ändert sich erst, wenn du dort auf „Veröffentlichen“ klickst.': 'Adds the selected tags in the edit editor on MakerWorld and saves it as a draft. The live model only changes when you click "Publish" there.',
+  'Auswahl bei MakerWorld ergänzen (Entwurf)': 'Add selection on MakerWorld (draft)', 'Erst Tags auswählen.': 'Select tags first.', 'Tags bei MakerWorld ergänzen?': 'Add tags on MakerWorld?', 'Ergänzen': 'Add',
+  'Läuft … (Browser der Pi, ca. 1 Minute)': 'Running … (Pi browser, about 1 minute)', 'Tags ergänzt': 'tags added', 'übersprungen': 'skipped',
+  'Editor bei MakerWorld öffnen ↗': 'Open editor on MakerWorld ↗', 'Dort auf „Veröffentlichen“ klicken, um die Tags zu übernehmen.': 'Click "Publish" there to apply the tags.',
+  'Planung des MakerWorld-Uploads: modellieren, testdrucken, fotografieren, Upload-Paket erstellen, Entwurf anlegen und veröffentlichen. Die Verbindung zu MakerWorld entsteht erst nach dem Veröffentlichen.':
+    'Planning the MakerWorld upload: model, test print, photograph, create the upload pack, create the draft and publish. The connection to MakerWorld only exists after publishing.',
+  'Planung für den späteren MakerWorld-Upload. Eine Verbindung zu MakerWorld gibt es erst nach dem Veröffentlichen (der Pull verknüpft per Titel automatisch). Bis dahin trägst du Gewicht und Druckzeit aus deinem Slicer selbst ein.':
+    'Planning for the later MakerWorld upload. There is no connection to MakerWorld until it is published (the pull links it automatically by title). Until then you enter weight and print time from your slicer yourself.',
+  'nach dem Upload': 'after the upload', 'Phase abschließen': 'Complete phase', 'Beschreibung für MakerWorld entwerfen …': 'Draft the description for MakerWorld …',
+  'Tags, mit Komma getrennt (der Tag-Assistent schlägt bis zu 50 vor)': 'Tags, comma-separated (the tag assistant suggests up to 50)', 'Notizen (Ideen, Maße, offene Punkte) …': 'Notes (ideas, dimensions, open points) …',
+  'Plan für den MakerWorld-Eintrag': 'Plan for the MakerWorld entry', 'Modell öffnen': 'Open model', 'Mit MakerWorld verknüpfen': 'Link with MakerWorld',
+  'Nach dem Veröffentlichen verknüpft der nächste Pull automatisch (gleicher Titel). Ist der Titel bei MakerWorld ein anderer, wähle das Modell hier.': 'After publishing, the next pull links automatically (same title). If the title on MakerWorld differs, choose the model here.',
+  'Verknüpft.': 'Linked.', 'Verknüpfen': 'Link', 'Testdruck & Kosten': 'Test print & costs', 'UPLOAD-PLAN': 'UPLOAD PLAN', 'Eigenprojekt: ': 'Own project: ', 'Titel des geplanten Modells': 'Title of the planned model',
+  'Gewicht und Druckzeit aus deinem Slicer (Testdruck). Nach dem Upload kommen die echten Druckprofile und der MakerWorld-Ertrag automatisch dazu.': 'Weight and print time from your slicer (test print). After the upload the real print profiles and the MakerWorld earnings are added automatically.',
+  '— veröffentlichtes Modell wählen —': '— choose published model —', 'Projekt löschen': 'Delete project', ' · verknüpft mit dem MakerWorld-Modell': ' · linked to the MakerWorld model', 'Ähnliche Modelle': 'Similar models',
+  'Beschreibung': 'Description', 'Veröffentlicht': 'Published'
+});
+TR_RULES.unshift([/^(\d+) Tags passen eng zum Original\. Für bis zu 50 Tags oben „mehr Reichweite“ wählen und erneut recherchieren\.$/, '$1 tags fit the original closely. For up to 50 tags choose "more reach" above and research again.']);
+Object.assign(TR, { 'Tags passen eng zum Original. Für bis zu 50 Tags oben „mehr Reichweite“ wählen und erneut recherchieren.': 'tags fit the original closely. For up to 50 tags choose "more reach" above and research again.' });

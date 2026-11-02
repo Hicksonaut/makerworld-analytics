@@ -84,8 +84,8 @@ const PSTAGE_COLOR = { anfrage: '#6b7280', modellierung: '#9a6a00', druck: '#1f5
 // beglichen = bezahlt oder kostenlos; Voraussetzung für "ausgeliefert"/archiviert.
 const isSettled = p => !!p.paid || p.margin_tier === 'kostenlos' || (p.price != null && p.price <= 0);
 // Eigenprojekte (kein Kunde): eigener Produktions-Workflow bis zur Veröffentlichung.
-const SELF_STAGES = [['idee','Idee'],['modellierung','Modellieren'],['druck','Drucken'],['fotos','Fotos'],['eintrag','MW-Eintrag'],['publish','Veröffentlicht'],['abgebrochen','Abgebrochen']];
-const SSTAGE_COLOR = { idee: '#6b7280', modellierung: '#9a6a00', druck: '#1f5c8f', fotos: '#0e7490', eintrag: '#7c3aed', publish: '#1a7f37', abgebrochen: '#c1332d' };
+const SELF_STAGES = [['idee','Idee'],['modellierung','Modellieren'],['druck','Testdruck'],['fotos','Fotos'],['eintrag','Upload-Paket'],['entwurf','Entwurf'],['publish','Veröffentlicht'],['abgebrochen','Abgebrochen']];
+const SSTAGE_COLOR = { idee: '#6b7280', modellierung: '#9a6a00', druck: '#1f5c8f', fotos: '#0e7490', eintrag: '#7c3aed', entwurf: '#a855f7', publish: '#1a7f37', abgebrochen: '#c1332d' };
 // Prioritäten (alle Projekte) — zum Strukturieren, was wann verfolgt wird.
 const PRIORITIES = [['3','Dringend'],['2','Hoch'],['1','Normal'],['0','Niedrig']];
 const PRIO_COLOR = { 3: '#c1332d', 2: '#b4620a', 1: '#6b7280', 0: '#9aa0a6' };
