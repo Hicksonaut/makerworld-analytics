@@ -80,6 +80,20 @@ and the data never leaves it.
   payment date + MakerWorld payouts − recorded expenses) as an Excel-friendly CSV
   with the invoice number on every booking. Same sources as the profit/loss page,
   verified by a test. Not tax advice.
+- **Tag assistant (up to 50 tags):** for every planned or published model the app
+  researches which tags the best-ranked models on your topic use and how often
+  users use each tag overall (MakerWorld's suggestion API exposes usage counts,
+  and it also asks what people type after your main term), scores them together
+  with your own tag performance, drops block-listed words and near-duplicates and
+  proposes up to 50 tags tiered *broad / medium / niche*. One click merges the
+  selection into your draft tags.
+- **Upload assistant (draft only):** a planned model gets an *upload pack*
+  (Bambu 3MF or raw model, covers 4:3 / 3:4, real print photos, category,
+  description, tags) with a checklist. One click opens MakerWorld's own editor in
+  the logged-in browser (on the Raspberry Pi, same session as the pull), fills it
+  in and **saves a draft** — it never publishes; you review and publish on
+  MakerWorld. Browser jobs run one at a time and never alongside the pull.
+  Experimental: it drives a third-party web UI that can change without notice.
 - Parts catalog (magnets, screws, inserts …) with unit prices that flow into
   the calculation.
 - **"Did this project pay off?"** — because a model you made privately for a
@@ -143,6 +157,10 @@ and the data never leaves it.
 | Experiments & change impact |
 |---|
 | ![](docs/08-experiments.png) |
+
+| Tag assistant & upload pack (planned model) |
+|---|
+| ![](docs/09-upload-assistant.png) |
 
 ---
 
@@ -222,6 +240,7 @@ one SQLite file under `data/` (git-ignored).
 server/   index.js (setup, host protection, mounting)  db.js  i18n.js  trash.js
           routes-models.js  routes-analytics.js  kpi.js  insights.js  health.js
           ops.js (pull, login, settings, cron)  experiments.js  invoices.js
+          mwjobs.js (browser jobs)  tags.js  upload.js  mw-categories.json
           crm.js  ingest.js  scraper.js  public.js  publicPage.js  seed-demo.js
 web/      index.html  styles.css  favicon.svg  vendor/chart.umd.min.js
 web/js/   core.js  i18n-en.js  ui.js  a11y.js  analytics.js  todos.js  models.js

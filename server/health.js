@@ -9,6 +9,9 @@ import { T } from './i18n.js';
 const app = express.Router();
 export const router = app;
 
+// ---- Browser-Auftraege neben dem Pull (Tag-Recherche, Upload-Assistent): nur einer gleichzeitig, nie parallel zum Pull ----
+export const mwJob = { name: null, running: false, startedAt: null, log: [], result: null, error: null, finishedAt: null };
+
 // ---- Pull-Status (eine Instanz gleichzeitig) ------------------------------
 export const pullState = { running: false, mode: null, startedAt: null, log: [], lastResult: null };
 export function pushLog(m) { pullState.log.push(m); if (pullState.log.length > 500) pullState.log.shift(); }

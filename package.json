@@ -10,7 +10,7 @@
     "seed:demo": "node server/seed-demo.js",
     "login": "node server/scraper.js --login",
     "pull": "node server/scraper.js --pull",
-    "test": "node --test tests/api.test.mjs tests/operations.test.mjs tests/features.test.mjs",
+    "test": "node --test tests/api.test.mjs tests/operations.test.mjs tests/features.test.mjs tests/tags-upload.test.mjs",
     "test:ui": "node --test --test-concurrency=1 tests/ui.test.mjs tests/i18n.test.mjs",
     "docs:screenshots": "node scripts/screenshots.mjs"
   },

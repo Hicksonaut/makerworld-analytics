@@ -9,13 +9,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import { startApp, launchBrowser, ROOT, ROUTES } from './helpers.mjs';
+import { fileURLToPath } from 'node:url';
+const FAKE_SESSION = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fake-session.mjs');
 
 // ---- Heuristik: sieht ein Text deutsch aus? (Umlaute oder typische deutsche Woerter)
 const DE_WORDS = ['der', 'die', 'das', 'und', 'oder', 'nicht', 'kein', 'keine', 'keiner', 'für', 'mit', 'von', 'zu', 'zum', 'zur', 'ist', 'wird', 'werden', 'noch', 'alle', 'neu', 'neue', 'neuer',
   'bitte', 'aufgabe', 'aufgaben', 'kunde', 'kunden', 'projekt', 'projekte', 'modell', 'modelle', 'tage', 'tagen', 'woche', 'monat', 'datum', 'preis', 'bezahlt', 'offen', 'löschen',
   'speichern', 'gespeichert', 'gelöscht', 'hinzufügen', 'eintrag', 'notiz', 'notizen', 'fehler', 'beim', 'nach', 'aus', 'auf', 'bei', 'im', 'ein', 'eine', 'einen', 'sind', 'oben', 'unten',
   'jetzt', 'erst', 'zurück', 'öffnen', 'schließen', 'abbrechen', 'laden', 'läuft', 'fertig', 'gesamt', 'summe', 'anzahl', 'wenn', 'dann', 'damit', 'wie', 'was', 'wer', 'wo', 'gibt', 'als', 'auch', 'nur', 'mehr', 'zeigt', 'wähle', 'wählen',
-  'seit', 'dein', 'deine', 'ihr', 'ihre', 'ihrer', 'über', 'gegenüber', 'vorwoche', 'letzte', 'letzten', 'erledigt', 'angelegt', 'verknüpft', 'hochgeladen', 'veröffentlicht', 'stufe', 'phase', 'kosten', 'gewinn', 'verlust', 'rechnung', 'beleg', 'kontostand', 'konto', 'spalten', 'klick', 'verlauf', 'klickrate', 'punkte', 'periode', 'eigene', 'eigener', 'kategorie', 'ansicht', 'metrik', 'leeren', 'gruppieren', 'kumuliert', 'korrelation', 'drucken', 'nichts', 'trefferquote', 'titelbild', 'kontakte', 'kontakt', 'kostenlos', 'marge', 'stk', 'reicht', 'hoch', 'deutsch', 'hinweis', 'hinweise', 'keins', 'gefunden', 'anlegen', 'planen', 'empfehlen', 'suchen', 'durchsuchen', 'direkte', 'druckprofil', 'druckzeit', 'projekttitel', 'vorher', 'nachher', 'druck', 'eigenprojekt', 'folgt', 'pkt', 'anz', 'bierdeckel', 'hebel', 'änderung', 'änderungen', 'erkannt', 'automatisch', 'gramm', 'spule', 'aufgabe', 'kunde', 'verdient', 'offene', 'offenen', 'gesamt', 'empfehlungen', 'wert', 'anzeigen', 'ausblenden', 'einblenden', 'ziel', 'ziele', 'stunden', 'einzel', 'menge', 'betrag', 'kontakten', 'abgeschlossen', 'planung', 'entwurf', 'bearbeitet', 'zuletzt', 'bewertung', 'bewertungen', 'beschreibung', 'titel', 'bild', 'bilder', 'fehlt', 'unbekannt', 'wochen', 'monatlich', 'täglich', 'wöchentlich', 'einnahmen', 'ausgaben', 'gewinn', 'umsatz', 'zahlung', 'zahlungen', 'forderungen', 'mahnung', 'urteil', 'hypothese'];
+  'seit', 'dein', 'deine', 'ihr', 'ihre', 'ihrer', 'über', 'gegenüber', 'vorwoche', 'letzte', 'letzten', 'erledigt', 'angelegt', 'verknüpft', 'hochgeladen', 'veröffentlicht', 'stufe', 'phase', 'kosten', 'gewinn', 'verlust', 'rechnung', 'beleg', 'kontostand', 'konto', 'geplant', 'spalten', 'klick', 'verlauf', 'klickrate', 'punkte', 'periode', 'eigene', 'eigener', 'kategorie', 'ansicht', 'metrik', 'leeren', 'gruppieren', 'kumuliert', 'korrelation', 'drucken', 'nichts', 'trefferquote', 'titelbild', 'kontakte', 'kontakt', 'kostenlos', 'marge', 'stk', 'reicht', 'hoch', 'deutsch', 'hinweis', 'hinweise', 'keins', 'gefunden', 'anlegen', 'planen', 'empfehlen', 'suchen', 'durchsuchen', 'direkte', 'druckprofil', 'druckzeit', 'projekttitel', 'vorher', 'nachher', 'druck', 'eigenprojekt', 'folgt', 'pkt', 'anz', 'bierdeckel', 'hebel', 'änderung', 'änderungen', 'erkannt', 'automatisch', 'gramm', 'spule', 'aufgabe', 'kunde', 'verdient', 'offene', 'offenen', 'gesamt', 'empfehlungen', 'wert', 'anzeigen', 'ausblenden', 'einblenden', 'ziel', 'ziele', 'stunden', 'einzel', 'menge', 'betrag', 'kontakten', 'abgeschlossen', 'planung', 'entwurf', 'bearbeitet', 'zuletzt', 'bewertung', 'bewertungen', 'beschreibung', 'titel', 'bild', 'bilder', 'fehlt', 'unbekannt', 'wochen', 'monatlich', 'täglich', 'wöchentlich', 'einnahmen', 'ausgaben', 'gewinn', 'umsatz', 'zahlung', 'zahlungen', 'forderungen', 'mahnung', 'urteil', 'hypothese'];
 const DE_RE = new RegExp(`[äöüÄÖÜß]|\\bz\\. ?B\\.|(?:^|[^\\p{L}])(?:${DE_WORDS.join('|')})(?![\\p{L}])`, 'iu');
 export const looksGerman = s => DE_RE.test(s);
 // Bekannte Ausnahmen: Eigennamen/Fachbegriffe, die in beiden Sprachen gleich sind
@@ -55,7 +57,7 @@ describe('Englische Oberflaeche: Quellcode', () => {
 
 describe('Englische Oberflaeche: Laufzeit', () => {
   let app, browser;
-  before(async () => { app = await startApp(); browser = await launchBrowser(); });
+  before(async () => { app = await startApp({ env: { MWA_FAKE_SESSION: FAKE_SESSION, PULL_MIN_RAM_MB: '1' } }); browser = await launchBrowser(); });
   after(async () => { await browser?.close(); await app.stop(); app.cleanup(); });
 
   it('alle Seiten, Drawer, Dialoge, Statusseite und Rechnung sind uebersetzt', async () => {
@@ -93,6 +95,15 @@ describe('Englische Oberflaeche: Laufzeit', () => {
     await go('pipeline', 900); await page.click('button:has-text("Plan model"), button:has-text("Modell planen")'); await sleep(250); await scanText('modal-modell'); await page.keyboard.press('Escape');
     // 3) Drawer
     const modelId = await page.evaluate(() => STATE.overview.models[0].design_id);
+    // Tag-Assistent (Fake-Recherche) und Upload-Paket
+    const waitJob = async () => { for (let i = 0; i < 100; i++) { const j = (await app.api('GET', '/mw/job')).body; if (j && !j.running && j.finishedAt) return j; await sleep(200); } };
+    await app.api('POST', '/tags/research', { design_id: modelId, title: 'Desk Organizer' }); await waitJob();
+    const planId0 = (await app.api('GET', '/overview')).body.planned?.[0]?.design_id;
+    if (planId0) {
+      await app.api('POST', '/tags/research', { design_id: planId0, title: 'Desk Organizer' }); await waitJob();
+      await app.api('PUT', `/upload/${planId0}`, { category_id: 404, private: true });
+      for (const [kind, name] of [['file3mf', 'a.3mf'], ['photo', 'p1.png'], ['cover43', 'c.png']]) await fetch(`${app.base}/api/upload/${planId0}/file?kind=${kind}&name=${name}`, { method: 'PUT', headers: { 'content-type': 'application/octet-stream' }, body: Buffer.from('x'.repeat(500)) });
+    }
     await page.evaluate(i => openModel(i), modelId); await sleep(1600); await scanText('modell-drawer');
     for (const chip of await page.locator('#drawer .chip').all()) await chip.click().catch(() => {});
     await scanText('modell-drawer-chips'); await closeD();

@@ -452,3 +452,27 @@ TR_RULES.unshift([/^(.+) Views\/30 T$/, '$1 views/30 d']);
 Object.assign(TR, { 'Views 7 T': 'Views 7 d', 'Views 30 T': 'Views 30 d', 'Downloads 7 T': 'Downloads 7 d', 'Downloads 30 T': 'Downloads 30 d', '— Profil / Standard —': '— Profile / default —' });
 TR_RULES.push([/^(.*?)(\+?\d+) T$/, (m, a, n) => t(a) + n + ' d']);
 Object.assign(TR, { 'ja': 'yes', 'nein': 'no', 'Preis': 'Price', 'Dateien': 'Files', 'Sonstiges': 'Other', 'Tags': 'Tags' });
+
+// ---- Tag-Assistent und MakerWorld-Upload ----
+TR_RULES.unshift([/^(\d+)\/50 Tags übernommen\.$/, '$1/50 tags applied.'], [/^(.+) wird hochgeladen …$/, 'Uploading $1 …']);
+Object.assign(TR, {
+  'Eigene Daten': 'Own data', 'Top-Modelle': 'Top models', 'Nutzer-Eingaben': 'User input', 'breit': 'broad', 'mittel': 'medium', 'Nische': 'niche', 'Aktuell': 'Currently', 'ausgewählt': 'selected',
+  'neu': 'new', 'Stand': 'As of', 'Abfragen': 'queries', 'Nutzung': 'Usage', 'Verbreitung': 'Reach', 'gründlich': 'thorough', 'schnell': 'fast',
+  'gründlich fragt zusätzlich ab, was Nutzer zu deinem Hauptbegriff tippen (dauert länger)': 'thorough also queries what users type after your main term (takes longer)',
+  'Tags recherchieren': 'Research tags', 'Recherche läuft …': 'Research running …', 'Tag-Assistent': 'Tag assistant', 'Auswahl übernehmen': 'Apply selection', 'Auswahl kopieren': 'Copy selection',
+  'Deine bisherigen Tags bleiben vorn, die Auswahl wird ergänzt (max. 50).': 'Your existing tags stay first, the selection is added (max. 50).',
+  'Tags kopiert — bei MakerWorld im Modell einfügen.': 'Tags copied — paste them into the model on MakerWorld.', 'Kopieren nicht möglich.': 'Copying not possible.',
+  'Erst einen Titel eintragen.': 'Enter a title first.', 'Start nicht möglich.': 'Cannot start.',
+  'MakerWorld erlaubt bis zu 50 Tags. Der Assistent wertet aus, welche Tags die bestplatzierten Modelle zu deinem Thema nutzen und wie oft Nutzer jeden Tag insgesamt verwenden — kombiniert mit deinen eigenen Erfahrungswerten. Läuft im Browser der Pi (ca. 1–2 Minuten).':
+    'MakerWorld allows up to 50 tags. The assistant analyses which tags the best-ranked models on your topic use and how often users use each tag overall — combined with your own experience. Runs in the Pi\'s browser (about 1–2 minutes).',
+  'MakerWorld-Upload (Entwurf)': 'MakerWorld upload (draft)', 'Bambu-Studio-Datei (.3mf)': 'Bambu Studio file (.3mf)', 'Rohmodell (STL/STEP/… — wenn keine 3MF)': 'Raw model (STL/STEP/… — if no 3MF)',
+  'Cover 4:3': 'Cover 4:3', 'Cover 3:4 (App)': 'Cover 3:4 (app)', 'Echte Druckfotos (≥ 3)': 'Real print photos (≥ 3)', 'Weitere Modellbilder': 'More model pictures',
+  'Datei wählen': 'Choose file', 'Ersetzen': 'Replace', '— Kategorie —': '— Category —', 'Sichtbarkeit „Privat“ vorbelegen': 'Pre-select visibility "Private"', '(nötig)': '(required)',
+  'Neuen Entwurf anlegen': 'Create new draft', 'Als Entwurf bei MakerWorld anlegen': 'Create draft on MakerWorld', 'Weiteren Entwurf anlegen?': 'Create another draft?',
+  'Es gibt schon einen Entwurf bei MakerWorld. Ein neuer Entwurf wird zusätzlich angelegt (den alten kannst du löschen).': 'There is already a draft on MakerWorld. A new draft is created in addition (you can delete the old one).',
+  'Legt nur einen ENTWURF an und füllt den MakerWorld-Editor aus. Veröffentlicht wird nie automatisch — das machst du in MakerWorld.': 'Only creates a DRAFT and fills in the MakerWorld editor. Nothing is ever published automatically — you do that on MakerWorld.',
+  'In MakerWorld öffnen ↗': 'Open in MakerWorld ↗', 'Entwurf löschen': 'Delete draft', 'Entwurf bei MakerWorld löschen?': 'Delete draft on MakerWorld?',
+  'Der Entwurf wird bei MakerWorld gelöscht. Dein Paket hier bleibt erhalten.': 'The draft is deleted on MakerWorld. Your pack here is kept.', 'Entwurf angelegt.': 'Draft created.', 'Upload fehlgeschlagen.': 'Upload failed.',
+  'Läuft … (bitte Fenster offen lassen, das dauert je nach Dateigröße einige Minuten)': 'Running … (keep this window open; it takes a few minutes depending on file size)', 'Entwurf': 'Draft', 'Kategorie': 'Category'
+});
+Object.assign(TR, { 'GEPLANT': 'PLANNED' });

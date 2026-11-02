@@ -14,6 +14,9 @@ import { router as opsRouter, closeStaleRuns, rescheduleCron, rescheduleWeekly }
 import { router as healthRouter } from './health.js';
 import { router as experimentsRouter } from './experiments.js';
 import { router as invoicesRouter } from './invoices.js';
+import { router as mwjobsRouter } from './mwjobs.js';
+import { router as tagsRouter } from './tags.js';
+import { router as uploadRouter } from './upload.js';
 import fs from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -53,7 +56,7 @@ app.use(express.urlencoded({ limit: '2mb', extended: true }));
 app.use('/api', crm);
 
 // ---- Module (Routen) -----------------------------------------------------------------------
-app.use(modelsRouter, analyticsRouter, insightsRouter, opsRouter, healthRouter, experimentsRouter, invoicesRouter);
+app.use(modelsRouter, analyticsRouter, insightsRouter, opsRouter, healthRouter, experimentsRouter, invoicesRouter, mwjobsRouter, tagsRouter, uploadRouter);
 
 // ---- Öffentlicher Read-only-Statuslink für ein Projekt --------------------
 // (Nach außen erreichbar über den isolierten Server public.js; hier lokal fürs Testen.)

@@ -4,7 +4,7 @@ import cron from 'node-cron';
 import { db, getSetting, setSetting, nowIso } from './db.js';
 import { T } from './i18n.js';
 import { eurRate } from './kpi.js';
-import { pullState, pushLog, memAvailableMb } from './health.js';
+import { pullState, pushLog, memAvailableMb, mwJob } from './health.js';
 import { weeklyText, sendDigest, pushNotify, checkMilestones } from './insights.js';
 import { checkExperiments } from './experiments.js';
 
@@ -38,6 +38,7 @@ async function waitForRam(onLog) {
 
 async function startPull(mode) {
   if (pullState.running) return { started: false, reason: T('Ein Pull läuft bereits.', 'A pull is already running.') };
+  if (mwJob.running) return { started: false, reason: T(`Ein Browser-Auftrag (${mwJob.name}) läuft gerade - bitte danach erneut starten.`, `A browser job (${mwJob.name}) is running - please try again afterwards.`) };
   pullState.running = true; pullState.mode = mode; pullState.startedAt = nowIso(); pullState.log = [];
   pushLog(T(`Pull gestartet (${mode}) ...`, `Pull started (${mode}) ...`));
   let timedOut = false;

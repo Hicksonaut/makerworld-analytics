@@ -73,6 +73,12 @@ async function openPlanned(id) {
   tagsI.addEventListener('input', () => { drawTagPrev(); saveMeta(); }); drawTagPrev();
   body.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Beschreibung (Entwurf)', metaHd), el('div', { class: 'bd' }, descTa)));
   body.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, 'Tags (Entwurf)'), el('div', { class: 'bd' }, tagsI, tagsPrev)));
+  const tagList = () => tagsI.value.split(',').map(x => x.trim()).filter(Boolean);
+  const tagCard = tagAssistantCard({ design_id: id, title: () => titleI.value, description: () => descTa.value, tags: tagList,
+    apply: list => { tagsI.value = list.join(', '); tagsI.dispatchEvent(new Event('input')); tagCard.refreshCount(); } });
+  body.append(tagCard);
+  tagsI.addEventListener('input', () => tagCard.refreshCount());
+  uploadCard(m, tagList).then(c => body.append(c)).catch(() => {});
 
   // Notizen
   const notesTa = el('textarea', { style: 'width:100%;height:110px', placeholder: 'Notizen …' }, m.notes || '');
@@ -284,6 +290,9 @@ async function openModel(id) {
   // Galerie
   if (d.images && d.images.length) body.append(el('div', { class: 'card' }, el('div', { class: 'hd' }, `Bilder (${d.images.length})`),
     el('div', { class: 'bd' }, el('div', { class: 'gallery' }, d.images.map(im => el('a', { href: im.local_path ? '/data/' + im.local_path : im.url, target: '_blank' }, el('img', { src: im.local_path ? '/data/' + im.local_path : im.url, loading: 'lazy' })))))));
+
+  // Tag-Assistent (bestehende Modelle: Vorschläge zum Kopieren, Tags pflegst du bei MakerWorld)
+  body.append(tagAssistantCard({ design_id: id, title: () => m.title || '', description: () => (m.description || '').replace(/<[^>]+>/g, ' '), tags: () => (Array.isArray(m.tags) ? m.tags : []), apply: null }));
 
   // Änderungs-Events
   body.append(renderEventEditor(id, d.events));

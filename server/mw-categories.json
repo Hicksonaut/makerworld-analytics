@@ -1,0 +1,429 @@
+[
+ {
+  "id": 900,
+  "name": "3D-Drucker",
+  "slug": "3d-printer",
+  "children": [
+   {
+    "id": 901,
+    "name": "3D-Drucker Zubehör",
+    "slug": "3d-printer-accessories"
+   },
+   {
+    "id": 902,
+    "name": "3D-Drucker Teile",
+    "slug": "3d-printer-parts"
+   },
+   {
+    "id": 903,
+    "name": "Test Modelle",
+    "slug": "test-models"
+   }
+  ]
+ },
+ {
+  "id": 100,
+  "name": "Kunst",
+  "slug": "art",
+  "children": [
+   {
+    "id": 101,
+    "name": "2D-Kunst",
+    "slug": "2d-art"
+   },
+   {
+    "id": 103,
+    "name": "Münzen & Abzeichen",
+    "slug": "coin-and-badges"
+   },
+   {
+    "id": 102,
+    "name": "Schilder & Logos",
+    "slug": "signs-and-logos"
+   },
+   {
+    "id": 104,
+    "name": "Skulpturen",
+    "slug": "sculptures"
+   },
+   {
+    "id": 105,
+    "name": "Sonstige Kunstmodelle",
+    "slug": "other-art-models"
+   }
+  ]
+ },
+ {
+  "id": 500,
+  "name": "Bildung",
+  "slug": "education",
+  "children": [
+   {
+    "id": 503,
+    "name": "Biologie",
+    "slug": "biology"
+   },
+   {
+    "id": 505,
+    "name": "Chemie",
+    "slug": "chemistry"
+   },
+   {
+    "id": 501,
+    "name": "Entwicklung",
+    "slug": "engineering"
+   },
+   {
+    "id": 506,
+    "name": "Geographie",
+    "slug": "geography"
+   },
+   {
+    "id": 502,
+    "name": "Mathematik",
+    "slug": "mathematics"
+   },
+   {
+    "id": 504,
+    "name": "Physik & Astronomie",
+    "slug": "physics-and-astronomy"
+   },
+   {
+    "id": 507,
+    "name": "Sonstige Bildungsmodelle",
+    "slug": "other-education-models"
+   }
+  ]
+ },
+ {
+  "id": 200,
+  "name": "Mode",
+  "slug": "fashion",
+  "children": [
+   {
+    "id": 201,
+    "name": "Beutel",
+    "slug": "bags"
+   },
+   {
+    "id": 202,
+    "name": "Kleidung",
+    "slug": "clothes"
+   },
+   {
+    "id": 206,
+    "name": "Ohrringe",
+    "slug": "earrings"
+   },
+   {
+    "id": 204,
+    "name": "Schuhwerk",
+    "slug": "footwear"
+   },
+   {
+    "id": 203,
+    "name": "Brillen",
+    "slug": "glasses"
+   },
+   {
+    "id": 208,
+    "name": "Schmuck",
+    "slug": "jewelry"
+   },
+   {
+    "id": 205,
+    "name": "Ringe",
+    "slug": "rings"
+   },
+   {
+    "id": 207,
+    "name": "Sonstige Mode Modelle",
+    "slug": "other-fashion-models"
+   }
+  ]
+ },
+ {
+  "id": 300,
+  "name": "Hobby & Heimwerken",
+  "slug": "hobby-and-diy",
+  "children": [
+   {
+    "id": 301,
+    "name": "Elektronik",
+    "slug": "electronics"
+   },
+   {
+    "id": 303,
+    "name": "Musik",
+    "slug": "music"
+   },
+   {
+    "id": 304,
+    "name": "RC",
+    "slug": "rc"
+   },
+   {
+    "id": 305,
+    "name": "Robotik",
+    "slug": "robotics"
+   },
+   {
+    "id": 306,
+    "name": "Sport & Outdoor",
+    "slug": "sport-and-outdoors"
+   },
+   {
+    "id": 302,
+    "name": "Fahrzeuge",
+    "slug": "vehicles"
+   },
+   {
+    "id": 307,
+    "name": "Sonstiges Hobby & Heimwerken",
+    "slug": "other-hobby-and-diy"
+   }
+  ]
+ },
+ {
+  "id": 400,
+  "name": "Haushalt",
+  "slug": "household",
+  "children": [
+   {
+    "id": 401,
+    "name": "Dekor",
+    "slug": "decor"
+   },
+   {
+    "id": 403,
+    "name": "Feierlichkeiten",
+    "slug": "festivities"
+   },
+   {
+    "id": 402,
+    "name": "Garten",
+    "slug": "garden"
+   },
+   {
+    "id": 404,
+    "name": "Büro",
+    "slug": "office"
+   },
+   {
+    "id": 405,
+    "name": "Tiere",
+    "slug": "pets"
+   },
+   {
+    "id": 406,
+    "name": "Sonstige Hausmodelle",
+    "slug": "other-house-models"
+   }
+  ]
+ },
+ {
+  "id": 600,
+  "name": "Miniaturen",
+  "slug": "miniatures",
+  "children": [
+   {
+    "id": 601,
+    "name": "Tiere",
+    "slug": "animals"
+   },
+   {
+    "id": 602,
+    "name": "Architektur",
+    "slug": "architecture"
+   },
+   {
+    "id": 603,
+    "name": "Kreaturen",
+    "slug": "creatures"
+   },
+   {
+    "id": 604,
+    "name": "Personen",
+    "slug": "people"
+   },
+   {
+    "id": 605,
+    "name": "Sonstige Miniaturen",
+    "slug": "other-miniatures"
+   }
+  ]
+ },
+ {
+  "id": 1000,
+  "name": "Requisiten & Cosplays",
+  "slug": "props-and-cosplays",
+  "children": [
+   {
+    "id": 1003,
+    "name": "Kostüme",
+    "slug": "costumes"
+   },
+   {
+    "id": 1001,
+    "name": "Masken & Helme",
+    "slug": "masks-and-helmets"
+   },
+   {
+    "id": 1002,
+    "name": "Cosplay-Waffen",
+    "slug": "replica-weapon"
+   },
+   {
+    "id": 1004,
+    "name": "Sonstige Requisiten & Cosplays",
+    "slug": "other-props-and-cosplays"
+   }
+  ]
+ },
+ {
+  "id": 700,
+  "name": "Werkzeuge",
+  "slug": "tools",
+  "children": [
+   {
+    "id": 705,
+    "name": "Gadgets",
+    "slug": "gadgets"
+   },
+   {
+    "id": 703,
+    "name": "Handwerkzeuge",
+    "slug": "hand-tools"
+   },
+   {
+    "id": 704,
+    "name": "Werkzeugmaschinen",
+    "slug": "machine-tools"
+   },
+   {
+    "id": 702,
+    "name": "Messwerkzeuge",
+    "slug": "measure-tools"
+   },
+   {
+    "id": 707,
+    "name": "Medizinische Werkzeuge",
+    "slug": "medical-tools"
+   },
+   {
+    "id": 701,
+    "name": "Organisatoren",
+    "slug": "organizers"
+   },
+   {
+    "id": 706,
+    "name": "Sonstige Werkzeuge",
+    "slug": "other-tools"
+   }
+  ]
+ },
+ {
+  "id": 800,
+  "name": "Spielzeug & Spiele",
+  "slug": "toys-and-games",
+  "children": [
+   {
+    "id": 802,
+    "name": "Brettspiele",
+    "slug": "board-games"
+   },
+   {
+    "id": 801,
+    "name": "Figuren",
+    "slug": "characters"
+   },
+   {
+    "id": 803,
+    "name": "Outdoor-Spielzeug",
+    "slug": "outdoor-toys"
+   },
+   {
+    "id": 804,
+    "name": "Puzzel",
+    "slug": "puzzles"
+   },
+   {
+    "id": 806,
+    "name": "Bausätze",
+    "slug": "construction-sets"
+   },
+   {
+    "id": 805,
+    "name": "Sonstige Spielzeuge & Spiele",
+    "slug": "other-toys-and-games"
+   }
+  ]
+ },
+ {
+  "id": 2000,
+  "name": "Generatives 3D-Modell",
+  "slug": "generative-3d-model",
+  "children": [
+   {
+    "id": 2001,
+    "name": "Hueforge & Lithophane",
+    "slug": "hueforge-lithophane"
+   },
+   {
+    "id": 2002,
+    "name": "Mache mein Schild",
+    "slug": "make-my-sign"
+   },
+   {
+    "id": 2003,
+    "name": "Mach meine Vase",
+    "slug": "make-my-vase"
+   },
+   {
+    "id": 2004,
+    "name": "Pixel-Puzzle Ersteller",
+    "slug": "pixel-puzzle-maker"
+   },
+   {
+    "id": 2005,
+    "name": "Relief-Skulpturen Ersteller",
+    "slug": "3d-to-relief-sculpture"
+   },
+   {
+    "id": 2006,
+    "name": "KI-Scanner",
+    "slug": "ai-scanner"
+   },
+   {
+    "id": 2007,
+    "name": "Bild zu Schlüsselanhänger",
+    "slug": "image-to-keychain"
+   },
+   {
+    "id": 2008,
+    "name": "Schreibtisch-Organizer Ersteller",
+    "slug": "make-my-desk-organizer"
+   },
+   {
+    "id": 2009,
+    "name": "PrintMon Ersteller",
+    "slug": "printmon-maker"
+   },
+   {
+    "id": 2010,
+    "name": "Erstelle meine Statue",
+    "slug": "statue-maker"
+   },
+   {
+    "id": 2011,
+    "name": "Hersteller von Weihnachtsornamenten",
+    "slug": "christmas-ornament-maker"
+   },
+   {
+    "id": 2012,
+    "name": "Mach meine Laterne",
+    "slug": "make-my-lantern"
+   }
+  ]
+ }
+]

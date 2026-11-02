@@ -79,6 +79,23 @@ async function injectSessionCookies(ctx) {
   return false;
 }
 
+// Browser-Zugang fuer Zusatzjobs (Tag-Recherche, Upload-Assistent): dasselbe Profil und dieselbe Anmeldung wie der Pull,
+// ebenfalls als sichtbares Chrome off-screen (sonst blockt Cloudflare). fn({ ctx, page, handle, onLog }) laeuft eingeloggt.
+let jobCtx = null;
+export async function abortJob() { try { await jobCtx?.close(); } catch { /* schon zu */ } }
+export async function withSession(fn, { onLog = () => {} } = {}) {
+  const ctx = await launch(false, true); jobCtx = ctx;
+  try {
+    const page = await ctx.newPage();
+    await page.goto('https://makerworld.com/en', { waitUntil: 'domcontentloaded', timeout: 60000 }); await sleep(2500);
+    let s = await readSession(page);
+    if (!s.handle) { await sleep(3000); try { await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }); } catch {} await sleep(1500); s = await readSession(page); }
+    if (!s.handle && await injectSessionCookies(ctx)) { await page.goto('https://makerworld.com/en', { waitUntil: 'domcontentloaded', timeout: 60000 }); await sleep(2000); s = await readSession(page); }
+    if (!s.handle) throw new Error(T('Nicht eingeloggt. Bitte zuerst den Login ausführen (bzw. Session übertragen).', 'Not signed in. Please run the login first (or transfer the session).'));
+    return await fn({ ctx, page, handle: s.handle, onLog });
+  } finally { jobCtx = null; try { await ctx.close(); } catch { /* schon zu */ } }
+}
+
 // Ist ein gueltiger Login vorhanden?  {loggedIn, handle, buildId}
 export async function checkLogin() {
   const ctx = await launch(true);
